@@ -1,0 +1,6 @@
+.env
+image-processing.service
+__pycache__/
+*.pyc
+*.pyo
+*.tar.gz
