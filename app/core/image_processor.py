@@ -151,15 +151,19 @@ class ImageProcessor:
         try:
             windows_font = "C:/Windows/Fonts/Arial.ttf"
             linux_font = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+            docker_font = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+            
             if os.path.exists(windows_font):
                 font_path = windows_font
             elif os.path.exists(linux_font):
                 font_path = linux_font
+            elif os.path.exists(docker_font):
+                font_path = docker_font
             else:
                 raise FileNotFoundError("No suitable font found")
             
-            font_title = ImageFont.truetype(font_path, 48)
-            font_dimension = ImageFont.truetype(font_path, 25)  # 增大尺寸字体
+            font_title = ImageFont.truetype(font_path, 48)  # 改回原来的大小
+            font_dimension = ImageFont.truetype(font_path, 25)  # 改回原来的大小
         except Exception as e:
             print(f"Font loading error: {e}")
             font_title = ImageFont.load_default()
