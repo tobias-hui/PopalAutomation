@@ -219,7 +219,7 @@ class ImageProcessor:
         draw_arrow(right_x, bottom_y, 'right')
 
         # 长度文本
-        length_text = f"{self.dimensions['length']['value']}cm/{self.dimensions['length']['inch']}″"
+        length_text = f"{self.dimensions['length']['value']}cm/{self.dimensions['length']['inch']}inch"
         text_bbox = draw.textbbox((0, 0), length_text, font=font_dimension)
         text_width = text_bbox[2] - text_bbox[0]
         draw.text(
@@ -242,7 +242,7 @@ class ImageProcessor:
         draw_arrow(side_x, bottom_y, 'down')
 
         # 高度文本
-        height_text = f"{self.dimensions['height']['value']}cm/{self.dimensions['height']['inch']}″"
+        height_text = f"{self.dimensions['height']['value']}cm/{self.dimensions['height']['inch']}inch"
         text_bbox = draw.textbbox((0, 0), height_text, font=font_dimension)
         text_width = text_bbox[2] - text_bbox[0]
         text_height = text_bbox[3] - text_bbox[1]
