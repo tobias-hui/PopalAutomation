@@ -50,7 +50,7 @@ class OrderService:
             str: 添加了日期后缀的唯一订单号
         """
         # 生成当前日期时间后缀，格式：MMDD
-        date_suffix = datetime.now().strftime("%Y%m%d")
+        date_suffix = datetime.now().strftime("%Y%m%d%H%M")
         return f"{base_orderid}-{date_suffix}"
 
     def create_order(self, order_request: SimpleOrderRequest) -> Dict[str, Any]:
