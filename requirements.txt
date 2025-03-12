@@ -1,8 +1,5 @@
 fastapi==0.104.1
-pydantic==1.10.13
-pydantic-settings==2.0.3
-pydantic_core==2.27.2
-sqlalchemy==2.0.23
+pydantic>=1.7.4,!=1.8,!=1.8.1,!=2.0.0,!=2.0.1,!=2.1.0,<3.0.0
 python-dotenv==1.0.0
 uvicorn==0.24.0
 gunicorn==21.2.0
@@ -16,4 +13,5 @@ passlib==1.7.4
 bcrypt==4.0.1
 psycopg2-binary==2.9.9
 aliyun-python-sdk-core==2.14.0
-oss2==2.18.1 
+oss2==2.18.1
+sqlalchemy==2.0.23 
