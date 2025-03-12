@@ -30,9 +30,15 @@ class BaseImageProcessor(ABC):
     def resize_and_center(self, image: Image.Image) -> Image.Image:
         """调整图片大小并居中"""
         # 创建白色背景画布，使用原始图片尺寸
-        canvas = Image.new('RGBA', image.size, (255, 255, 255, 255))
-        # 直接粘贴原始图片
-        canvas.paste(image, (0, 0), image)
+        canvas = Image.new('RGB', image.size, (255, 255, 255))
+        # 将RGBA图片转换为RGB并粘贴
+        if image.mode == 'RGBA':
+            # 创建一个白色背景
+            bg = Image.new('RGB', image.size, (255, 255, 255))
+            # 使用alpha通道作为mask进行混合
+            bg.paste(image, mask=image.split()[3])
+            image = bg
+        canvas.paste(image, (0, 0))
         return canvas
 
     @abstractmethod
@@ -42,53 +48,94 @@ class BaseImageProcessor(ABC):
 
 class DimensionImageProcessor(BaseImageProcessor):
     """尺寸图处理器"""
-    def __init__(self, dimensions: Dict[str, Dict[str, float]], canvas_size: Tuple[int, int] = DEFAULT_CANVAS_SIZE):
+    def __init__(self, dimensions: Dict[str, Dict[str, float]], canvas_size: Tuple[int, int] = (1080, 1080)):
         super().__init__(canvas_size)
         self.dimensions = dimensions
 
     def process_image(self, image: Image.Image) -> Image.Image:
         """处理尺寸图片"""
-        # 保持原始尺寸，只添加白色背景
-        background = self.resize_and_center(image)
+        # 创建固定大小的画布，先用白色填充
+        canvas = Image.new('RGBA', self.canvas_size, (255, 255, 255, 255))
+        
+        # 保持原始尺寸，保留透明背景
+        if image.mode != 'RGBA':
+            image = image.convert('RGBA')
         
         # 获取图片边界
-        img_array = np.array(background)
+        img_array = np.array(image)
         edges = self._detect_edges(img_array)
-        product_bounds = self._get_product_bounds(edges, background.size)
+        product_bounds = self._get_product_bounds(edges, image.size)
         
-        # 添加尺寸标注
-        self._add_dimension_labels(background, product_bounds)
+        # 计算产品缩放比例
+        x, y, w, h = product_bounds
+        product_width = w
+        product_height = h
         
-        return background
+        # 为尺寸标注预留空间（左侧和底部各预留20%的空间）
+        MARGIN_RATIO = 0.2
+        available_width = int(self.canvas_size[0] * (1 - MARGIN_RATIO * 2))  # 减去左右边距
+        available_height = int(self.canvas_size[1] * (1 - MARGIN_RATIO * 2))  # 减去上下边距
+        
+        # 计算缩放比例
+        width_ratio = available_width / product_width
+        height_ratio = available_height / product_height
+        scale_ratio = min(width_ratio, height_ratio)
+        
+        # 缩放产品图片
+        new_width = int(product_width * scale_ratio)
+        new_height = int(product_height * scale_ratio)
+        
+        # 裁剪并缩放产品图片
+        product_image = image.crop((x, y, x + w, y + h))
+        product_image = product_image.resize((new_width, new_height), Image.LANCZOS)
+        
+        # 计算粘贴位置（居中，稍微向上一点为标题留出空间）
+        paste_x = int((self.canvas_size[0] - new_width) / 2)
+        paste_y = int((self.canvas_size[1] - new_height) / 2) + int(self.canvas_size[1] * 0.05)  # 向下偏移5%
+        
+        # 粘贴产品图片
+        canvas.paste(product_image, (paste_x, paste_y), product_image)
+        
+        # 添加标题和尺寸标注
+        self._add_title_and_labels(canvas, (paste_x, paste_y, new_width, new_height))
+        
+        return canvas
 
     def _detect_edges(self, img_array: np.ndarray) -> np.ndarray:
         """使用OpenCV检测边缘"""
-        gray = cv2.cvtColor(img_array, cv2.COLOR_RGBA2GRAY)
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        edges = cv2.Canny(blurred, 50, 150)
-        kernel = np.ones((3,3), np.uint8)
-        return cv2.dilate(edges, kernel, iterations=1)
+        # 如果是RGBA图片，使用alpha通道
+        if img_array.shape[-1] == 4:
+            alpha = img_array[:, :, 3]
+            # 将alpha值大于0的区域标记为边缘
+            edges = (alpha > 0).astype(np.uint8) * 255
+            return edges
+        else:
+            gray = cv2.cvtColor(img_array, cv2.COLOR_RGBA2GRAY)
+            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+            edges = cv2.Canny(blurred, 50, 150)
+            kernel = np.ones((3,3), np.uint8)
+            return cv2.dilate(edges, kernel, iterations=1)
 
     def _get_product_bounds(self, edges: np.ndarray, image_size: Tuple[int, int]) -> Tuple[int, int, int, int]:
         """获取产品边界"""
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # 找到非零像素的边界
+        rows = np.any(edges, axis=1)
+        cols = np.any(edges, axis=0)
+        if not np.any(rows) or not np.any(cols):
+            # 如果没有找到边界，返回整个图片的边界
+            return (0, 0, image_size[0], image_size[1])
+            
+        ymin, ymax = np.where(rows)[0][[0, -1]]
+        xmin, xmax = np.where(cols)[0][[0, -1]]
         
-        if contours:
-            # 找到最大轮廓
-            max_contour = max(contours, key=cv2.contourArea)
-            return cv2.boundingRect(max_contour)
-        else:
-            # 如果没有找到轮廓，使用图片中心区域
-            center_x = image_size[0] // 2
-            center_y = image_size[1] // 2
-            width = image_size[0] // 3
-            height = image_size[1] // 3
-            return (
-                center_x - width // 2,
-                center_y - height // 2,
-                width,
-                height
-            )
+        # 添加一些边距
+        padding = 10
+        xmin = max(0, xmin - padding)
+        ymin = max(0, ymin - padding)
+        xmax = min(image_size[0], xmax + padding)
+        ymax = min(image_size[1], ymax + padding)
+        
+        return (xmin, ymin, xmax - xmin, ymax - ymin)
 
     def _get_font(self, size: int = 48) -> ImageFont.FreeTypeFont:
         """获取字体"""
@@ -105,38 +152,62 @@ class DimensionImageProcessor(BaseImageProcessor):
         logger.warning("No suitable font found, using default font")
         return ImageFont.load_default()
 
-    def _add_dimension_labels(self, image: Image.Image, bounds: Tuple[int, int, int, int]) -> None:
-        """添加尺寸标注"""
+    def _add_title_and_labels(self, image: Image.Image, bounds: Tuple[int, int, int, int]) -> None:
+        """添加标题和尺寸标注"""
         x, y, w, h = bounds
         draw = ImageDraw.Draw(image)
 
-        # 设置字体
-        font_title = self._get_font(48)
-        font_dimension = self._get_font(25)
+        # 设置固定字体大小
+        title_size = 50  # DIMENSION 标题使用50号字体
+        font_size = 22   # 尺寸信息使用22号字体
+        
+        try:
+            # 尝试使用系统字体
+            font_paths = [
+                "C:/Windows/Fonts/Arial.ttf",  # Windows
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",  # Linux
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",  # Docker
+                "arial.ttf"  # 当前目录
+            ]
+            
+            title_font = None
+            normal_font = None
+            
+            for font_path in font_paths:
+                if os.path.exists(font_path):
+                    title_font = ImageFont.truetype(font_path, title_size)
+                    normal_font = ImageFont.truetype(font_path, font_size)
+                    break
+            
+            if title_font is None:
+                title_font = ImageFont.load_default()
+                normal_font = ImageFont.load_default()
+        except:
+            title_font = ImageFont.load_default()
+            normal_font = ImageFont.load_default()
 
         # 绘制标题
         title = "DIMENSION"
-        title_bbox = draw.textbbox((0, 0), title, font=font_title)
+        title_bbox = draw.textbbox((0, 0), title, font=title_font)
         title_width = title_bbox[2] - title_bbox[0]
-        # 使用实际图片尺寸来计算标题位置
-        text_y = int(image.size[1] * 0.08)  # 图片高度的8%位置
+        title_y = int(self.canvas_size[1] * 0.05)  # 顶部5%位置
         draw.text(
-            ((image.size[0] - title_width) // 2, text_y),  # 水平居中
+            ((self.canvas_size[0] - title_width) // 2, title_y),
             title,
-            fill=(0, 0, 0),
-            font=font_title
+            fill=(0, 0, 0, 255),
+            font=title_font
         )
 
         # 设置尺寸线参数
-        margin = 30
-        line_color = (0, 0, 0)
-        line_width = 2
-        arrow_size = 8
+        margin = int(min(self.canvas_size) * 0.1)  # 边距为画布较小边的10%
+        line_color = (0, 0, 0, 255)  # 黑色，不透明
+        line_width = 2  # 固定线宽为2像素
+        arrow_size = 10  # 固定箭头大小为10像素
 
         # 绘制底部长度线
-        bottom_y = y + h + margin
-        left_x = x - margin // 2
-        right_x = x + w + margin // 2
+        bottom_y = y + h + margin // 2
+        left_x = x - margin // 4
+        right_x = x + w + margin // 4
         
         # 绘制长度线和箭头
         draw.line([(left_x, bottom_y), (right_x, bottom_y)], fill=line_color, width=line_width)
@@ -145,19 +216,19 @@ class DimensionImageProcessor(BaseImageProcessor):
 
         # 绘制长度文本
         length_text = f"{self.dimensions['length']['value']}cm/{self.dimensions['length']['inch']}inch"
-        text_bbox = draw.textbbox((0, 0), length_text, font=font_dimension)
+        text_bbox = draw.textbbox((0, 0), length_text, font=normal_font)
         text_width = text_bbox[2] - text_bbox[0]
         draw.text(
-            (x + (w - text_width) // 2, bottom_y + 5),
+            (x + (w - text_width) // 2, bottom_y + margin // 4),
             length_text,
             fill=line_color,
-            font=font_dimension
+            font=normal_font
         )
 
         # 绘制右侧高度线
-        side_x = x + w + margin
-        top_y = y - margin // 2
-        bottom_y = y + h + margin // 2
+        side_x = x + w + margin // 2
+        top_y = y - margin // 4
+        bottom_y = y + h + margin // 4
         
         # 绘制高度线和箭头
         draw.line([(side_x, top_y), (side_x, bottom_y)], fill=line_color, width=line_width)
@@ -166,19 +237,19 @@ class DimensionImageProcessor(BaseImageProcessor):
 
         # 绘制高度文本
         height_text = f"{self.dimensions['height']['value']}cm/{self.dimensions['height']['inch']}inch"
-        text_bbox = draw.textbbox((0, 0), height_text, font=font_dimension)
+        text_bbox = draw.textbbox((0, 0), height_text, font=normal_font)
         text_width = text_bbox[2] - text_bbox[0]
         text_height = text_bbox[3] - text_bbox[1]
         
         # 创建并旋转高度文本
         txt = Image.new('RGBA', (text_width + 10, text_height + 10), (0, 0, 0, 0))
         txt_draw = ImageDraw.Draw(txt)
-        txt_draw.text((5, 5), height_text, fill=line_color, font=font_dimension)
+        txt_draw.text((5, 5), height_text, fill=line_color, font=normal_font)
         txt = txt.rotate(90, expand=True)
         
         # 粘贴旋转后的文字
         text_y = y + (h - txt.size[1]) // 2
-        image.paste(txt, (side_x + 5, text_y), txt)
+        image.paste(txt, (side_x + margin // 4, text_y), txt)
 
     def _draw_arrow(self, draw: ImageDraw.Draw, x: int, y: int, direction: str, 
                    color: Tuple[int, int, int], width: int, size: int) -> None:
@@ -340,18 +411,23 @@ class CarouselImageProcessor(BaseImageProcessor):
                 is_dimension_image = '_2' in image_path.name
 
                 # 处理图片
-                with Image.open(image_path).convert("RGBA") as img:
+                with Image.open(image_path) as img:
+                    # 确保图片是RGB模式
+                    if img.mode == 'RGBA':
+                        # 创建白色背景
+                        bg = Image.new('RGB', img.size, (255, 255, 255))
+                        # 使用alpha通道作为mask进行混合
+                        bg.paste(img, mask=img.split()[3])
+                        img = bg
+                    elif img.mode != 'RGB':
+                        img = img.convert('RGB')
+
                     if is_dimension_image:
-                        # Add white background and dimension labels
-                        white_bg = Image.new("RGBA", img.size, "WHITE")
-                        white_bg.paste(img, mask=img)
-                        processed_image = self._add_dimension_labels(white_bg)
+                        # Add dimension labels
+                        processed_image = self._add_dimension_labels(img)
                         output_name = f'dimension_{number}_{uuid.uuid4()}.png'
                     else:
-                        # Only add white background
-                        white_bg = Image.new("RGBA", img.size, "WHITE")
-                        white_bg.paste(img, mask=img)
-                        processed_image = white_bg
+                        processed_image = img
                         output_name = f'{number}_{uuid.uuid4()}.png'
 
                     processed_image.save(self.output_dir / output_name)
@@ -482,152 +558,95 @@ class ImageProcessor:
             raise Exception(f"Error processing image {image_path}: {str(e)}")
 
     def create_dimension_image(self, image: Image.Image) -> Image.Image:
-        """创建带尺寸标注的图片"""
-        # 调整图片大小并居中
-        background, (offset_x, offset_y), (img_width, img_height) = self.resize_and_center(image, margin_ratio=0.15)
-        draw = ImageDraw.Draw(background)
-
-        # 使用OpenCV进行边缘检测
-        img_array = np.array(background)
-        gray = cv2.cvtColor(img_array, cv2.COLOR_RGBA2GRAY)
-        # 使用高斯模糊减少噪声
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        # 使用Canny边缘检测
-        edges = cv2.Canny(blurred, 50, 150)
-        # 使用膨胀操作连接边缘
-        kernel = np.ones((3,3), np.uint8)
-        edges = cv2.dilate(edges, kernel, iterations=1)
+        """处理图片，添加尺寸标注"""
+        # 确保输入图片是RGB模式
+        if image.mode == 'RGBA':
+            # 创建白色背景
+            bg = Image.new('RGB', image.size, (255, 255, 255))
+            # 使用alpha通道作为mask进行混合
+            bg.paste(image, mask=image.split()[3])
+            image = bg
+        elif image.mode != 'RGB':
+            image = image.convert('RGB')
         
-        # 找到轮廓
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # 计算产品主体占比
+        img_width, img_height = image.size
         
-        if contours:
-            # 找到最大轮廓
-            max_contour = max(contours, key=cv2.contourArea)
-            x, y, w, h = cv2.boundingRect(max_contour)
-            # 更新产品边界
-            product_left = x
-            product_right = x + w
-            product_top = y
-            product_bottom = y + h
-        else:
-            # 如果没有找到轮廓，使用原始尺寸
-            product_left = offset_x
-            product_right = offset_x + img_width
-            product_top = offset_y
-            product_bottom = offset_y + img_height
-
-        # 获取字体
+        # 计算合适的缩放比例
+        # 建议产品主体最大占画布的70%
+        MAX_PRODUCT_RATIO = 0.7
+        scale_ratio = 1.0
+        
+        # 计算当前产品占比（假设产品填充了整个图片）
+        product_ratio = max(img_width / img_width, img_height / img_height)
+        
+        if product_ratio > MAX_PRODUCT_RATIO:
+            scale_ratio = MAX_PRODUCT_RATIO / product_ratio
+        
+        # 计算缩放后的尺寸
+        new_width = int(img_width * scale_ratio)
+        new_height = int(img_height * scale_ratio)
+        
+        # 缩放图片
+        if scale_ratio < 1.0:
+            image = image.resize((new_width, new_height), Image.LANCZOS)
+        
+        # 计算需要的画布大小（为尺寸标注预留空间）
+        MARGIN_RATIO = 0.2  # 预留20%的边距空间
+        canvas_width = int(new_width * (1 + MARGIN_RATIO * 2))  # 左右各预留边距
+        canvas_height = int(new_height * (1 + MARGIN_RATIO * 2))  # 上下各预留边距
+        
+        # 创建新的白色画布（使用RGB模式）
+        canvas = Image.new('RGB', (canvas_width, canvas_height), (255, 255, 255))
+        
+        # 将产品图片粘贴到画布中心
+        paste_x = int((canvas_width - new_width) / 2)
+        paste_y = int((canvas_height - new_height) / 2)
+        canvas.paste(image, (paste_x, paste_y))
+        
+        # 添加尺寸标注
+        draw = ImageDraw.Draw(canvas)
+        
+        # 设置字体和尺寸
+        font_size = int(min(canvas_width, canvas_height) * 0.05)  # 字体大小为画布较小边的5%
         try:
-            windows_font = "C:/Windows/Fonts/Arial.ttf"
-            linux_font = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-            docker_font = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-            
-            if os.path.exists(windows_font):
-                font_path = windows_font
-            elif os.path.exists(linux_font):
-                font_path = linux_font
-            elif os.path.exists(docker_font):
-                font_path = docker_font
-            else:
-                raise FileNotFoundError("No suitable font found")
-            
-            font_title = ImageFont.truetype(font_path, 48)  # 改回原来的大小
-            font_dimension = ImageFont.truetype(font_path, 25)  # 改回原来的大小
-        except Exception as e:
-            print(f"Font loading error: {e}")
-            font_title = ImageFont.load_default()
-            font_dimension = ImageFont.load_default()
-
-        # 绘制标题
-        title = "DIMENSION"
-        title_bbox = draw.textbbox((0, 0), title, font=font_title)
-        title_width = title_bbox[2] - title_bbox[0]
-        title_height = title_bbox[3] - title_bbox[1]
-        text_y = int(self.canvas_size[1] * 0.08)
-        draw.text(
-            ((self.canvas_size[0] - title_width) // 2, text_y),
-            title,
-            fill=(0, 0, 0),
-            font=font_title
-        )
-
-        # 设置尺寸线参数
-        margin = 30  # 减小边距使线条更贴近产品
-        line_color = (0, 0, 0)
-        line_width = 2
-        arrow_size = 8
-
-        # 底部长度线 - 使用检测到的产品边界
-        bottom_y = product_bottom + margin
-        left_x = product_left - margin // 2
-        right_x = product_right + margin // 2
-
-        # 绘制底部长度线
-        draw.line([(left_x, bottom_y), (right_x, bottom_y)], fill=line_color, width=line_width)
+            font = ImageFont.truetype("arial.ttf", font_size)
+        except:
+            font = ImageFont.load_default()
         
-        # 绘制箭头函数
-        def draw_arrow(x, y, direction):
-            """绘制箭头
-            direction: 'left', 'right', 'up', 'down'
-            """
-            if direction == 'left':
-                draw.line([(x, y), (x + arrow_size, y - arrow_size)], fill=line_color, width=line_width)
-                draw.line([(x, y), (x + arrow_size, y + arrow_size)], fill=line_color, width=line_width)
-            elif direction == 'right':
-                draw.line([(x, y), (x - arrow_size, y - arrow_size)], fill=line_color, width=line_width)
-                draw.line([(x, y), (x - arrow_size, y + arrow_size)], fill=line_color, width=line_width)
-            elif direction == 'up':
-                draw.line([(x, y), (x - arrow_size, y + arrow_size)], fill=line_color, width=line_width)
-                draw.line([(x, y), (x + arrow_size, y + arrow_size)], fill=line_color, width=line_width)
-            elif direction == 'down':
-                draw.line([(x, y), (x - arrow_size, y - arrow_size)], fill=line_color, width=line_width)
-                draw.line([(x, y), (x + arrow_size, y - arrow_size)], fill=line_color, width=line_width)
-
-        # 绘制长度线的箭头
-        draw_arrow(left_x, bottom_y, 'left')
-        draw_arrow(right_x, bottom_y, 'right')
-
-        # 长度文本
-        length_text = f"{self.dimensions['length']['value']}cm/{self.dimensions['length']['inch']}inch"
-        text_bbox = draw.textbbox((0, 0), length_text, font=font_dimension)
-        text_width = text_bbox[2] - text_bbox[0]
-        draw.text(
-            (product_left + (w - text_width) // 2, bottom_y + 5),
-            length_text,
-            fill=line_color,
-            font=font_dimension
-        )
-
-        # 右侧高度线 - 使用检测到的产品边界
-        side_x = product_right + margin
-        top_y = product_top - margin // 2
-        bottom_y = product_bottom + margin // 2
-
-        # 绘制右侧高度线
-        draw.line([(side_x, top_y), (side_x, bottom_y)], fill=line_color, width=line_width)
-        
-        # 绘制高度线的箭头
-        draw_arrow(side_x, top_y, 'up')
-        draw_arrow(side_x, bottom_y, 'down')
-
-        # 高度文本
+        # 绘制尺寸线和标注
+        # 左侧高度标注
         height_text = f"{self.dimensions['height']['value']}cm/{self.dimensions['height']['inch']}inch"
-        text_bbox = draw.textbbox((0, 0), height_text, font=font_dimension)
-        text_width = text_bbox[2] - text_bbox[0]
-        text_height = text_bbox[3] - text_bbox[1]
+        text_width, text_height = draw.textsize(height_text, font=font)
         
-        # 创建临时图片用于旋转文字
-        txt = Image.new('RGBA', (text_width + 10, text_height + 10), (0, 0, 0, 0))
-        txt_draw = ImageDraw.Draw(txt)
-        txt_draw.text((5, 5), height_text, fill=line_color, font=font_dimension)
-        txt = txt.rotate(90, expand=True)
+        # 绘制高度线
+        line_margin = int(canvas_width * 0.05)  # 线条到边缘的距离
+        draw.line([(line_margin, paste_y), (line_margin, paste_y + new_height)], fill='black', width=2)
+        # 绘制箭头
+        arrow_size = int(font_size * 0.5)
+        draw.line([(line_margin - arrow_size, paste_y), (line_margin, paste_y), (line_margin + arrow_size, paste_y)], fill='black', width=2)
+        draw.line([(line_margin - arrow_size, paste_y + new_height), (line_margin, paste_y + new_height), (line_margin + arrow_size, paste_y + new_height)], fill='black', width=2)
+        # 绘制文字
+        text_x = line_margin - text_width - arrow_size
+        text_y = paste_y + (new_height - text_height) / 2
+        draw.text((text_x, text_y), height_text, fill='black', font=font)
         
-        # 粘贴旋转后的文字
-        text_y = product_top + (h - txt.size[1]) // 2
-        background.paste(txt, (side_x + 5, text_y), txt)
-
-        return background
+        # 底部宽度标注
+        width_text = f"{self.dimensions['width']['value']}cm/{self.dimensions['width']['inch']}inch"
+        text_width, text_height = draw.textsize(width_text, font=font)
+        
+        # 绘制宽度线
+        line_y = paste_y + new_height + line_margin
+        draw.line([(paste_x, line_y), (paste_x + new_width, line_y)], fill='black', width=2)
+        # 绘制箭头
+        draw.line([(paste_x, line_y - arrow_size), (paste_x, line_y), (paste_x, line_y + arrow_size)], fill='black', width=2)
+        draw.line([(paste_x + new_width, line_y - arrow_size), (paste_x + new_width, line_y), (paste_x + new_width, line_y + arrow_size)], fill='black', width=2)
+        # 绘制文字
+        text_x = paste_x + (new_width - text_width) / 2
+        text_y = line_y + arrow_size
+        draw.text((text_x, text_y), width_text, fill='black', font=font)
+        
+        return canvas
 
 def process_images(zip_url: str, dimensions_str: str) -> str:
     """

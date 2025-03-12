@@ -21,8 +21,13 @@ wheels/
 .installed.cfg
 *.egg
 
+# Environment variables
+.env
+.env.*
+
 # Virtual Environment
 venv/
+env/
 ENV/
 
 # IDE
@@ -35,14 +40,9 @@ ENV/
 logs/
 *.log
 
-# Local development
-.env
-.env.local
-.env.*.local
-
-# Output
-output/
+# Temporary files
 temp/
+tmp/
 
 # Docker
 .docker/

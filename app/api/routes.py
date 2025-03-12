@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File, Form, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, HttpUrl
 from typing import List, Optional, Dict
@@ -9,6 +9,9 @@ from app.core.image_processor import process_images, ImageProcessor
 from app.utils.oss_client import oss_client
 from app.utils.order_service import OrderService, SimpleOrderRequest
 from app.models.order_models import OrderRequest, OrderResponse
+from app.core.database import get_db
+from app.models.task_models import Task, serialize_request_data
+from sqlalchemy.orm import Session
 from pathlib import Path
 import os
 import json
@@ -39,17 +42,17 @@ logger = logging.getLogger(__name__)
 # 创建路由
 router = APIRouter()
 
-# 内存中存储任务信息（实际应用中应该使用数据库）
-tasks = {}
-
 # 创建订单服务实例
 order_service = OrderService()
 
-async def process_carousel_background(task_id: str, request: CarouselRequest):
+async def process_carousel_background(task_id: str, request: CarouselRequest, db: Session):
     """后台处理轮播图"""
     try:
-        tasks[task_id]["status"] = "processing"
-        tasks[task_id]["message"] = "Processing carousel images..."
+        # 更新任务状态为处理中
+        task = db.query(Task).filter(Task.task_id == task_id).first()
+        task.status = "processing"
+        task.message = "Processing carousel images..."
+        db.commit()
         
         # 解析尺寸文本
         dimensions = {}
@@ -149,33 +152,95 @@ async def process_carousel_background(task_id: str, request: CarouselRequest):
             oss_filename = f"carousel_images/carousel_{zip_unique_id}.zip"
             output_url = await oss_client.upload_file(output_zip, oss_filename)
             
-            tasks[task_id].update({
-                "status": "completed",
+            # 更新任务状态为完成
+            task.status = "completed"
+            task.completed_at = datetime.now()
+            task.output_url = output_url
+            task.result = {
+                "total_images": len(image_files),
                 "output_url": output_url,
-                "completed_at": datetime.now(),
-                "message": "Carousel processing completed successfully",
-                "result": {
-                    "total_images": len(image_files),
-                    "output_url": output_url,
-                    "dimensions": dimensions
-                }
-            })
+                "dimensions": dimensions
+            }
+            db.commit()
             
     except Exception as e:
         logger.error(f"Error processing carousel task {task_id}: {str(e)}")
-        tasks[task_id].update({
-            "status": "failed",
-            "error": str(e),
-            "completed_at": datetime.now(),
-            "message": "Task failed - see error for details"
-        })
+        task = db.query(Task).filter(Task.task_id == task_id).first()
+        task.status = "failed"
+        task.error = str(e)
+        task.completed_at = datetime.now()
+        task.message = "Task failed - see error for details"
+        db.commit()
 
-async def process_dimension_background(task_id: str, request: DimensionImageRequest):
+@router.post("/carousel", response_model=ProcessResponse)
+async def process_carousel(
+    request: CarouselRequest, 
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
+    """处理轮播图API端点"""
+    task_id = str(uuid.uuid4())
+    created_at = datetime.now()
+    
+    # 创建新任务记录，序列化请求数据
+    new_task = Task(
+        task_id=task_id,
+        status="pending",
+        created_at=created_at,
+        message="Carousel processing task created successfully",
+        request_data=serialize_request_data(request.dict())
+    )
+    db.add(new_task)
+    db.commit()
+    
+    background_tasks.add_task(process_carousel_background, task_id, request, db)
+    
+    return ProcessResponse(
+        task_id=task_id,
+        status="pending",
+        message="Carousel processing task created successfully",
+        created_at=created_at
+    )
+
+@router.post("/dimension", response_model=ProcessResponse)
+async def process_dimension(
+    request: DimensionImageRequest, 
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
+    """处理尺寸图API端点"""
+    task_id = str(uuid.uuid4())
+    created_at = datetime.now()
+    
+    # 创建新任务记录，序列化请求数据
+    new_task = Task(
+        task_id=task_id,
+        status="pending",
+        created_at=created_at,
+        message="Dimension image processing task created successfully",
+        request_data=serialize_request_data(request.dict())
+    )
+    db.add(new_task)
+    db.commit()
+    
+    background_tasks.add_task(process_dimension_background, task_id, request, db)
+    
+    return ProcessResponse(
+        task_id=task_id,
+        status="pending",
+        message="Dimension image processing task created successfully",
+        created_at=created_at
+    )
+
+async def process_dimension_background(task_id: str, request: DimensionImageRequest, db: Session):
     """后台处理尺寸图"""
     try:
-        tasks[task_id]["status"] = "processing"
-        tasks[task_id]["message"] = "Processing dimension image..."
-        
+        # 更新任务状态为处理中
+        task = db.query(Task).filter(Task.task_id == task_id).first()
+        task.status = "processing"
+        task.message = "Processing dimension image..."
+        db.commit()
+
         async with aiohttp.ClientSession() as session:
             async with session.get(str(request.image_url)) as response:
                 if response.status != 200:
@@ -185,7 +250,6 @@ async def process_dimension_background(task_id: str, request: DimensionImageRequ
         with TemporaryDirectory() as temp_dir:
             temp_dir = Path(temp_dir)
             image_path = temp_dir / "original.png"
-            # 使用UUID生成唯一的输出文件名
             unique_id = uuid.uuid4()
             output_path = temp_dir / f"dimension_{unique_id}.png"
 
@@ -203,22 +267,22 @@ async def process_dimension_background(task_id: str, request: DimensionImageRequ
                     final_image = processor.process_image(original_image)
                     final_image.save(output_path)
 
-                # 上传到OSS，使用唯一的文件名
+                # 上传到OSS
                 oss_filename = f"dimension_images/dimension_{unique_id}.png"
                 output_url = await oss_client.upload_file(output_path, oss_filename)
 
-                tasks[task_id].update({
-                    "status": "completed",
-                    "output_url": output_url,
-                    "completed_at": datetime.now(),
-                    "message": "Image processing completed successfully",
-                    "result": {
-                        "original_size": os.path.getsize(image_path),
-                        "processed_size": os.path.getsize(output_path),
-                        "dimensions": request.dimensions.dict(),
-                        "output_url": output_url
-                    }
-                })
+                # 更新任务状态为完成
+                task.status = "completed"
+                task.completed_at = datetime.now()
+                task.output_url = output_url
+                task.message = "Image processing completed successfully"
+                task.result = {
+                    "original_size": os.path.getsize(image_path),
+                    "processed_size": os.path.getsize(output_path),
+                    "dimensions": request.dimensions.dict(),
+                    "output_url": output_url
+                }
+                db.commit()
 
             except Exception as e:
                 logger.error(f"Error in image processing: {str(e)}")
@@ -227,217 +291,118 @@ async def process_dimension_background(task_id: str, request: DimensionImageRequ
     except Exception as e:
         error_msg = str(e)
         logger.error(f"Error processing dimension task {task_id}: {error_msg}")
-        tasks[task_id].update({
-            "status": "failed",
-            "error": error_msg,
-            "completed_at": datetime.now(),
-            "message": "Task failed - see error for details"
-        })
-
-@router.post("/carousel", response_model=ProcessResponse)
-async def process_carousel(request: CarouselRequest, background_tasks: BackgroundTasks):
-    """
-    处理轮播图API端点
-    """
-    task_id = str(uuid.uuid4())
-    created_at = datetime.now()
-    
-    tasks[task_id] = {
-        "status": "pending",
-        "created_at": created_at,
-        "request": request.dict()
-    }
-    
-    background_tasks.add_task(process_carousel_background, task_id, request)
-    
-    return ProcessResponse(
-        task_id=task_id,
-        status="pending",
-        message="Carousel processing task created successfully",
-        created_at=created_at
-    )
-
-@router.post("/dimension", response_model=ProcessResponse)
-async def process_dimension(request: DimensionImageRequest, background_tasks: BackgroundTasks):
-    """
-    处理尺寸图API端点
-    """
-    task_id = str(uuid.uuid4())
-    created_at = datetime.now()
-    
-    tasks[task_id] = {
-        "status": "pending",
-        "created_at": created_at,
-        "request": request.dict()
-    }
-    
-    background_tasks.add_task(process_dimension_background, task_id, request)
-    
-    return ProcessResponse(
-        task_id=task_id,
-        status="pending",
-        message="Dimension image processing task created successfully",
-        created_at=created_at
-    )
+        task = db.query(Task).filter(Task.task_id == task_id).first()
+        task.status = "failed"
+        task.error = error_msg
+        task.completed_at = datetime.now()
+        task.message = "Task failed - see error for details"
+        db.commit()
 
 @router.get("/tasks/{task_id}/result")
-async def get_task_result(task_id: str):
-    """
-    获取任务处理结果
+async def get_task_result(task_id: str, db: Session = Depends(get_db)):
+    """获取任务处理结果"""
+    task = db.query(Task).filter(Task.task_id == task_id).first()
     
-    参数:
-    - task_id: 任务ID
-    
-    返回:
-    - 任务的详细结果，包括:
-      - 处理状态
-      - 输出URL
-      - 处理参数
-      - 错误信息（如果有）
-    """
-    if task_id not in tasks:
+    if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     
-    task = tasks[task_id]
-    
-    if task["status"] not in ["completed", "failed"]:
+    if task.status not in ["completed", "failed"]:
         raise HTTPException(
             status_code=400, 
             detail="Task is still processing or pending"
         )
     
-    result = {
-        "status": task["status"],
-        "completed_at": task["completed_at"],
-        "output_url": task.get("output_url"),
-        "error": task.get("error"),
-        "result": task.get("result"),
-        "original_request": task.get("request")
-    }
-    
-    return result
+    return task.to_dict()
 
 @router.get("/tasks/{task_id}", response_model=TaskQueryResponse)
-async def get_task_status(task_id: str):
-    """
-    获取任务状态
+async def get_task_status(task_id: str, db: Session = Depends(get_db)):
+    """获取任务状态"""
+    task = db.query(Task).filter(Task.task_id == task_id).first()
     
-    参数:
-    - task_id: 任务ID
-    
-    返回:
-    - 任务的当前状态信息
-    
-    注意:
-    - 如果需要获取完整的处理结果，请使用 /tasks/{task_id}/result 端点
-    """
-    if task_id not in tasks:
+    if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    
-    task = tasks[task_id]
     
     # 计算进度和预计时间
     progress = None
     estimated_time = None
-    if task["status"] == "processing":
-        elapsed_time = (datetime.now() - task["created_at"]).total_seconds()
+    if task.status == "processing":
+        elapsed_time = (datetime.now() - task.created_at).total_seconds()
         if elapsed_time < 300:  # 5分钟内的任务
             progress = min(elapsed_time / 300 * 100, 99)
             estimated_time = max(300 - elapsed_time, 1)
     
     return TaskQueryResponse(
-        task_id=task_id,
-        status=task["status"],
+        task_id=task.task_id,
+        status=task.status,
         progress=progress,
-        message=task.get("message", "Task found"),
-        created_at=task["created_at"],
-        completed_at=task.get("completed_at"),
-        output_url=task.get("output_url"),
-        error=task.get("error"),
+        message=task.message,
+        created_at=task.created_at,
+        completed_at=task.completed_at,
+        output_url=task.output_url,
+        error=task.error,
         estimated_time=estimated_time,
-        result=task.get("result")
+        result=task.result
     )
 
 @router.get("/tasks", response_model=List[TaskQueryResponse])
 async def list_tasks(
     limit: int = 10,
     status: Optional[str] = None,
-    created_after: Optional[datetime] = None
+    created_after: Optional[datetime] = None,
+    db: Session = Depends(get_db)
 ):
-    """
-    获取任务列表
+    """获取任务列表"""
+    query = db.query(Task)
     
-    参数:
-    - limit: 返回的最大任务数量（默认10）
-    - status: 筛选特定状态的任务（可选）
-    - created_after: 筛选特定时间之后创建的任务（可选）
-    
-    返回:
-    任务状态列表，每个任务包含与单个任务查询相同的字段
-    
-    示例请求:
-    ```bash
-    # 获取所有处理中的任务
-    curl -X GET "http://your-api-host/tasks?status=processing"
-    
-    # 获取最近1小时创建的任务
-    curl -X GET "http://your-api-host/tasks?created_after=2024-03-15T10:00:00"
-    ```
-    """
-    filtered_tasks = []
-    for task_id, task in tasks.items():
-        if status and task["status"] != status:
-            continue
-        if created_after and task["created_at"] < created_after:
-            continue
-            
-        # 计算进度和预计时间
-        progress = None
-        estimated_time = None
-        if task["status"] == "processing":
-            elapsed_time = (datetime.now() - task["created_at"]).total_seconds()
-            if elapsed_time < 300:
-                progress = min(elapsed_time / 300 * 100, 99)
-                estimated_time = max(300 - elapsed_time, 1)
+    if status:
+        query = query.filter(Task.status == status)
+    if created_after:
+        query = query.filter(Task.created_at > created_after)
         
-        filtered_tasks.append(TaskQueryResponse(
-            task_id=task_id,
-            status=task["status"],
-            progress=progress,
-            message=task.get("message", "Task found"),
-            created_at=task["created_at"],
-            completed_at=task.get("completed_at"),
-            output_url=task.get("output_url"),
-            error=task.get("error"),
-            estimated_time=estimated_time
-        ))
+    tasks = query.order_by(Task.created_at.desc()).limit(limit).all()
     
-    # 按创建时间排序并限制数量
-    filtered_tasks.sort(key=lambda x: x.created_at, reverse=True)
-    return filtered_tasks[:limit]
+    return [
+        TaskQueryResponse(
+            task_id=task.task_id,
+            status=task.status,
+            progress=None,
+            message=task.message,
+            created_at=task.created_at,
+            completed_at=task.completed_at,
+            output_url=task.output_url,
+            error=task.error,
+            estimated_time=None,
+            result=task.result
+        ) for task in tasks
+    ]
 
 @router.delete("/tasks/{task_id}")
-async def delete_task(task_id: str):
+async def delete_task(task_id: str, db: Session = Depends(get_db)):
     """删除任务记录"""
-    if task_id not in tasks:
+    task = db.query(Task).filter(Task.task_id == task_id).first()
+    
+    if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     
-    task = tasks.pop(task_id)
-    if task.get("output_url"):
+    if task.output_url:
         try:
-            file_path = task["output_url"].split("/")[-1]
+            file_path = task.output_url.split("/")[-1]
             oss_client.delete_file(file_path)
         except Exception as e:
             logger.error(f"Error deleting file from OSS: {str(e)}")
     
+    db.delete(task)
+    db.commit()
+    
     return {"status": "success", "message": "Task deleted successfully"}
 
 @router.get("/health")
-async def health_check():
+async def health_check(db: Session = Depends(get_db)):
     """健康检查端点"""
-    total_tasks = len(tasks)
-    completed_tasks = sum(1 for task in tasks.values() if task["status"] == "completed")
-    failed_tasks = sum(1 for task in tasks.values() if task["status"] == "failed")
+    query = db.query(Task)
+    total_tasks = query.count()
+    completed_tasks = query.filter(Task.status == "completed").count()
+    failed_tasks = query.filter(Task.status == "failed").count()
     
     return {
         "status": "healthy",
