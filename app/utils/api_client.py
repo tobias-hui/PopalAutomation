@@ -14,7 +14,7 @@ import urllib3
 from datetime import datetime
 import logging
 from requests.adapters import HTTPAdapter
-from requests.packages.urllib3.util.retry import Retry
+from urllib3.util.retry import Retry
 
 # 配置日志
 logger = logging.getLogger(__name__)

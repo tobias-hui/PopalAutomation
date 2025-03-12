@@ -110,7 +110,7 @@ class DimensionImageProcessor(BaseImageProcessor):
             edges = (alpha > 0).astype(np.uint8) * 255
             return edges
         else:
-            gray = cv2.cvtColor(img_array, cv2.COLOR_RGBA2GRAY)
+            gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
             blurred = cv2.GaussianBlur(gray, (5, 5), 0)
             edges = cv2.Canny(blurred, 50, 150)
             kernel = np.ones((3,3), np.uint8)
