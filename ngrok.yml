@@ -1,0 +1,5 @@
+version: "2"
+tunnels:
+  fastapi:
+    proto: http
+    addr: 8000
