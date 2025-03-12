@@ -1,13 +1,13 @@
 from sqlalchemy import Column, String, DateTime, JSON
 from datetime import datetime
 from app.core.database import Base
-from pydantic import HttpUrl
+from pydantic import HttpUrl, AnyUrl
 
 def serialize_request_data(data: dict) -> dict:
     """序列化请求数据，处理特殊类型"""
     serialized = {}
     for key, value in data.items():
-        if isinstance(value, HttpUrl):
+        if hasattr(value, '__str__') and isinstance(value, AnyUrl):
             serialized[key] = str(value)
         elif isinstance(value, dict):
             serialized[key] = serialize_request_data(value)
