@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y \
     libgl1-mesa-glx \
     libglib2.0-0 \
     fonts-dejavu \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # 创建非root用户
@@ -23,15 +24,17 @@ RUN useradd -m -u 1000 appuser
 COPY requirements.txt .
 
 # 安装Python依赖
-RUN pip install --no-cache-dir -r requirements.txt \
-    && pip install gunicorn
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 创建必要的目录
+RUN mkdir -p /app/logs /app/output
 
 # 复制应用代码
 COPY . .
 
-# 创建必要的目录并设置权限
-RUN mkdir -p /app/logs /app/output \
-    && chown -R appuser:appuser /app
+# 设置目录权限
+RUN chown -R appuser:appuser /app \
+    && chmod -R 755 /app/logs /app/output
 
 # 切换到非root用户
 USER appuser

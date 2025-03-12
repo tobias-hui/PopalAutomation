@@ -8,8 +8,12 @@ services:
     ports:
       - "8001:8000"
     volumes:
-      - ./logs:/app/logs
-      - ./output:/app/output
+      - type: bind
+        source: ./logs
+        target: /app/logs
+      - type: bind
+        source: ./output
+        target: /app/output
     env_file:
       - .env
     restart: always
