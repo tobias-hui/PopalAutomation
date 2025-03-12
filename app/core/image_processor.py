@@ -11,6 +11,400 @@ from io import BytesIO
 from typing import Dict, Tuple, Optional
 from app.config.settings import CANVAS_SIZE
 import json
+import logging
+from abc import ABC, abstractmethod
+import tempfile
+import uuid
+
+# 配置日志
+logger = logging.getLogger(__name__)
+
+# 默认画布大小
+DEFAULT_CANVAS_SIZE = (800, 600)
+
+class BaseImageProcessor(ABC):
+    """图片处理器基类"""
+    def __init__(self, canvas_size: Tuple[int, int] = DEFAULT_CANVAS_SIZE):
+        self.canvas_size = canvas_size
+
+    def resize_and_center(self, image: Image.Image) -> Image.Image:
+        """调整图片大小并居中"""
+        # 创建白色背景画布，使用原始图片尺寸
+        canvas = Image.new('RGBA', image.size, (255, 255, 255, 255))
+        # 直接粘贴原始图片
+        canvas.paste(image, (0, 0), image)
+        return canvas
+
+    @abstractmethod
+    def process_image(self, image: Image.Image) -> Image.Image:
+        """处理图片的抽象方法"""
+        pass
+
+class DimensionImageProcessor(BaseImageProcessor):
+    """尺寸图处理器"""
+    def __init__(self, dimensions: Dict[str, Dict[str, float]], canvas_size: Tuple[int, int] = DEFAULT_CANVAS_SIZE):
+        super().__init__(canvas_size)
+        self.dimensions = dimensions
+
+    def process_image(self, image: Image.Image) -> Image.Image:
+        """处理尺寸图片"""
+        # 保持原始尺寸，只添加白色背景
+        background = self.resize_and_center(image)
+        
+        # 获取图片边界
+        img_array = np.array(background)
+        edges = self._detect_edges(img_array)
+        product_bounds = self._get_product_bounds(edges, background.size)
+        
+        # 添加尺寸标注
+        self._add_dimension_labels(background, product_bounds)
+        
+        return background
+
+    def _detect_edges(self, img_array: np.ndarray) -> np.ndarray:
+        """使用OpenCV检测边缘"""
+        gray = cv2.cvtColor(img_array, cv2.COLOR_RGBA2GRAY)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        edges = cv2.Canny(blurred, 50, 150)
+        kernel = np.ones((3,3), np.uint8)
+        return cv2.dilate(edges, kernel, iterations=1)
+
+    def _get_product_bounds(self, edges: np.ndarray, image_size: Tuple[int, int]) -> Tuple[int, int, int, int]:
+        """获取产品边界"""
+        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if contours:
+            # 找到最大轮廓
+            max_contour = max(contours, key=cv2.contourArea)
+            return cv2.boundingRect(max_contour)
+        else:
+            # 如果没有找到轮廓，使用图片中心区域
+            center_x = image_size[0] // 2
+            center_y = image_size[1] // 2
+            width = image_size[0] // 3
+            height = image_size[1] // 3
+            return (
+                center_x - width // 2,
+                center_y - height // 2,
+                width,
+                height
+            )
+
+    def _get_font(self, size: int = 48) -> ImageFont.FreeTypeFont:
+        """获取字体"""
+        font_paths = [
+            "C:/Windows/Fonts/Arial.ttf",  # Windows
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",  # Linux
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"  # Docker
+        ]
+        
+        for font_path in font_paths:
+            if os.path.exists(font_path):
+                return ImageFont.truetype(font_path, size)
+        
+        logger.warning("No suitable font found, using default font")
+        return ImageFont.load_default()
+
+    def _add_dimension_labels(self, image: Image.Image, bounds: Tuple[int, int, int, int]) -> None:
+        """添加尺寸标注"""
+        x, y, w, h = bounds
+        draw = ImageDraw.Draw(image)
+
+        # 设置字体
+        font_title = self._get_font(48)
+        font_dimension = self._get_font(25)
+
+        # 绘制标题
+        title = "DIMENSION"
+        title_bbox = draw.textbbox((0, 0), title, font=font_title)
+        title_width = title_bbox[2] - title_bbox[0]
+        # 使用实际图片尺寸来计算标题位置
+        text_y = int(image.size[1] * 0.08)  # 图片高度的8%位置
+        draw.text(
+            ((image.size[0] - title_width) // 2, text_y),  # 水平居中
+            title,
+            fill=(0, 0, 0),
+            font=font_title
+        )
+
+        # 设置尺寸线参数
+        margin = 30
+        line_color = (0, 0, 0)
+        line_width = 2
+        arrow_size = 8
+
+        # 绘制底部长度线
+        bottom_y = y + h + margin
+        left_x = x - margin // 2
+        right_x = x + w + margin // 2
+        
+        # 绘制长度线和箭头
+        draw.line([(left_x, bottom_y), (right_x, bottom_y)], fill=line_color, width=line_width)
+        self._draw_arrow(draw, left_x, bottom_y, 'left', line_color, line_width, arrow_size)
+        self._draw_arrow(draw, right_x, bottom_y, 'right', line_color, line_width, arrow_size)
+
+        # 绘制长度文本
+        length_text = f"{self.dimensions['length']['value']}cm/{self.dimensions['length']['inch']}inch"
+        text_bbox = draw.textbbox((0, 0), length_text, font=font_dimension)
+        text_width = text_bbox[2] - text_bbox[0]
+        draw.text(
+            (x + (w - text_width) // 2, bottom_y + 5),
+            length_text,
+            fill=line_color,
+            font=font_dimension
+        )
+
+        # 绘制右侧高度线
+        side_x = x + w + margin
+        top_y = y - margin // 2
+        bottom_y = y + h + margin // 2
+        
+        # 绘制高度线和箭头
+        draw.line([(side_x, top_y), (side_x, bottom_y)], fill=line_color, width=line_width)
+        self._draw_arrow(draw, side_x, top_y, 'up', line_color, line_width, arrow_size)
+        self._draw_arrow(draw, side_x, bottom_y, 'down', line_color, line_width, arrow_size)
+
+        # 绘制高度文本
+        height_text = f"{self.dimensions['height']['value']}cm/{self.dimensions['height']['inch']}inch"
+        text_bbox = draw.textbbox((0, 0), height_text, font=font_dimension)
+        text_width = text_bbox[2] - text_bbox[0]
+        text_height = text_bbox[3] - text_bbox[1]
+        
+        # 创建并旋转高度文本
+        txt = Image.new('RGBA', (text_width + 10, text_height + 10), (0, 0, 0, 0))
+        txt_draw = ImageDraw.Draw(txt)
+        txt_draw.text((5, 5), height_text, fill=line_color, font=font_dimension)
+        txt = txt.rotate(90, expand=True)
+        
+        # 粘贴旋转后的文字
+        text_y = y + (h - txt.size[1]) // 2
+        image.paste(txt, (side_x + 5, text_y), txt)
+
+    def _draw_arrow(self, draw: ImageDraw.Draw, x: int, y: int, direction: str, 
+                   color: Tuple[int, int, int], width: int, size: int) -> None:
+        """绘制箭头
+        direction: 'left', 'right', 'up', 'down'
+        """
+        if direction == 'left':
+            draw.line([(x, y), (x + size, y - size)], fill=color, width=width)
+            draw.line([(x, y), (x + size, y + size)], fill=color, width=width)
+        elif direction == 'right':
+            draw.line([(x, y), (x - size, y - size)], fill=color, width=width)
+            draw.line([(x, y), (x - size, y + size)], fill=color, width=width)
+        elif direction == 'up':
+            draw.line([(x, y), (x - size, y + size)], fill=color, width=width)
+            draw.line([(x, y), (x + size, y + size)], fill=color, width=width)
+        elif direction == 'down':
+            draw.line([(x, y), (x - size, y - size)], fill=color, width=width)
+            draw.line([(x, y), (x + size, y - size)], fill=color, width=width)
+
+class CarouselImageProcessor(BaseImageProcessor):
+    """轮播图处理器"""
+    def __init__(self, dimensions_text: str, canvas_size: Tuple[int, int] = DEFAULT_CANVAS_SIZE):
+        super().__init__(canvas_size)
+        self.dimensions = self._parse_dimensions_text(dimensions_text)
+        self.temp_dir: Optional[Path] = None
+        self.output_dir: Optional[Path] = None
+
+    def process_zip(self, zip_data: BytesIO) -> str:
+        """处理ZIP文件中的图片
+        Args:
+            zip_data: ZIP文件的二进制数据
+        Returns:
+            str: 处理后的ZIP文件路径
+        """
+        try:
+            # 创建临时目录
+            with tempfile.TemporaryDirectory() as temp_dir:
+                self.temp_dir = Path(temp_dir)
+                self.output_dir = self.temp_dir / "output"
+                self.output_dir.mkdir(exist_ok=True)
+
+                # 解压ZIP文件
+                self._extract_zip(zip_data)
+
+                # 处理所有图片
+                self._process_all_images()
+
+                # 创建输出ZIP文件
+                output_zip = "processed_carousel_images.zip"
+                self._create_output_zip(output_zip)
+
+                return output_zip
+
+        except Exception as e:
+            logger.error(f"Error processing carousel zip: {str(e)}")
+            raise
+        finally:
+            # 清理临时文件
+            self._cleanup()
+
+    def process_image(self, image: Image.Image) -> Image.Image:
+        """处理单张轮播图片"""
+        try:
+            # 调整图片大小并居中
+            processed = self.resize_and_center(image)
+            
+            # 如果是尺寸图，添加尺寸标注
+            if self.dimensions:
+                processed = self._add_dimension_labels(processed)
+            
+            return processed
+
+        except Exception as e:
+            logger.error(f"Error processing carousel image: {str(e)}")
+            raise
+
+    def _parse_dimensions_text(self, text: str) -> Dict:
+        """解析尺寸文本"""
+        if not text:
+            return {}
+
+        try:
+            # 预处理文本
+            # 处理可能的JSON格式
+            try:
+                cleaned_str = text.replace('\r\n', '\\n').replace('\n', '\\n')
+                json_data = json.loads(cleaned_str)
+                if isinstance(json_data, dict) and 'dimensions_text' in json_data:
+                    text = json_data['dimensions_text']
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+            # 标准化文本格式
+            text = ''.join(line.strip() for line in text.splitlines())
+            
+            # 提取维度信息
+            pattern = r'(Length|Width|Height):(\d+\.?\d*)cm'
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            
+            if not matches:
+                return {}
+                
+            # 构建维度字典
+            dimensions = {}
+            for dim_type, value in matches:
+                dim_type = dim_type.lower()
+                try:
+                    value = float(value)
+                    dimensions[dim_type] = {
+                        'value': value,
+                        'unit': 'cm',
+                        'inch': round(value / 2.54, 2)
+                    }
+                except ValueError:
+                    continue
+            
+            return dimensions
+
+        except Exception as e:
+            logger.error(f"Error parsing dimensions text: {str(e)}")
+            return {}
+
+    def _extract_zip(self, zip_data: BytesIO) -> None:
+        """解压ZIP文件"""
+        try:
+            with zipfile.ZipFile(zip_data, 'r') as zip_ref:
+                zip_ref.extractall(self.temp_dir)
+        except Exception as e:
+            raise Exception(f"Error extracting zip file: {str(e)}")
+
+    def _should_process_image(self, filename: str) -> bool:
+        """判断是否需要处理该图片"""
+        if filename.lower() == 'untitled.png':
+            return True
+        pattern = r'_\d+'
+        return bool(re.search(pattern, filename)) and any(
+            filename.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg']
+        )
+
+    def _process_all_images(self) -> None:
+        """处理所有图片"""
+        if not self.temp_dir or not self.output_dir:
+            raise ValueError("Temporary directories not initialized")
+
+        for image_path in self.temp_dir.rglob('*'):
+            if not self._should_process_image(image_path.name):
+                continue
+
+            try:
+                # 获取图片编号
+                match = re.search(r'_(\d+)', image_path.name)
+                if not match:
+                    # Keep original image with unique name
+                    unique_name = f"{image_path.stem}_{uuid.uuid4()}{image_path.suffix}"
+                    shutil.copy2(image_path, self.output_dir / unique_name)
+                    continue
+
+                number = match.group(1)
+                is_dimension_image = '_2' in image_path.name
+
+                # 处理图片
+                with Image.open(image_path).convert("RGBA") as img:
+                    if is_dimension_image:
+                        # Add white background and dimension labels
+                        white_bg = Image.new("RGBA", img.size, "WHITE")
+                        white_bg.paste(img, mask=img)
+                        processed_image = self._add_dimension_labels(white_bg)
+                        output_name = f'dimension_{number}_{uuid.uuid4()}.png'
+                    else:
+                        # Only add white background
+                        white_bg = Image.new("RGBA", img.size, "WHITE")
+                        white_bg.paste(img, mask=img)
+                        processed_image = white_bg
+                        output_name = f'{number}_{uuid.uuid4()}.png'
+
+                    processed_image.save(self.output_dir / output_name)
+
+            except Exception as e:
+                logger.error(f"Error processing image {image_path}: {str(e)}")
+                continue
+
+    def _create_output_zip(self, output_zip: str) -> None:
+        """创建输出ZIP文件"""
+        try:
+            with zipfile.ZipFile(output_zip, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for file_path in self.output_dir.rglob('*'):
+                    zipf.write(file_path, file_path.relative_to(self.output_dir))
+        except Exception as e:
+            raise Exception(f"Error creating output zip: {str(e)}")
+
+    def _cleanup(self) -> None:
+        """清理临时文件"""
+        try:
+            if self.temp_dir and self.temp_dir.exists():
+                shutil.rmtree(self.temp_dir)
+            if self.output_dir and self.output_dir.exists():
+                shutil.rmtree(self.output_dir)
+        except Exception as e:
+            logger.warning(f"Error cleaning up temporary files: {str(e)}")
+
+    def _add_dimension_labels(self, image: Image.Image) -> Image.Image:
+        """为尺寸图添加标注"""
+        if not self.dimensions:
+            return image
+
+        # 创建尺寸处理器
+        dimension_processor = DimensionImageProcessor(
+            dimensions=self.dimensions,
+            canvas_size=self.canvas_size
+        )
+        
+        # 处理图片
+        return dimension_processor.process_image(image)
+
+def create_processor(processor_type: str, **kwargs) -> BaseImageProcessor:
+    """工厂方法创建处理器"""
+    processors = {
+        'dimension': DimensionImageProcessor,
+        'carousel': CarouselImageProcessor
+    }
+    
+    processor_class = processors.get(processor_type)
+    if not processor_class:
+        raise ValueError(f"Unknown processor type: {processor_type}")
+    
+    return processor_class(**kwargs)
 
 class ImageProcessor:
     def __init__(self, dimensions: Dict[str, Dict[str, float]], canvas_size: Tuple[int, int] = CANVAS_SIZE):
@@ -54,16 +448,12 @@ class ImageProcessor:
             output_dir = Path(output_dir)
             base_name = image_path.name
 
-            # 特殊处理 untitled.png
-            if base_name.lower() == 'untitled.png':
-                output_name = '6.png'
-                shutil.copy2(image_path, output_dir / output_name)
-                return True
-
             # 检查是否为需要处理的图片
             match = re.search(r'_(\d+)', base_name)
             if not match:
-                return False
+                # Keep original image
+                shutil.copy2(image_path, output_dir / base_name)
+                return True
 
             number = match.group(1)
             is_dimension_image = '_2' in base_name
@@ -72,11 +462,17 @@ class ImageProcessor:
             original_image = Image.open(image_path).convert("RGBA")
 
             if is_dimension_image:
-                final_image = self.create_dimension_image(original_image)
-                output_name = f'dimension_{number}.png'
+                # Add white background and dimension labels
+                white_bg = Image.new("RGBA", original_image.size, "WHITE")
+                white_bg.paste(original_image, mask=original_image)
+                final_image = self.create_dimension_image(white_bg)
+                output_name = f'dimension_{number}_{uuid.uuid4()}.png'
             else:
-                final_image, _, _ = self.resize_and_center(original_image)
-                output_name = f'{number}.png'
+                # Only add white background
+                white_bg = Image.new("RGBA", original_image.size, "WHITE")
+                white_bg.paste(original_image, mask=original_image)
+                final_image = white_bg
+                output_name = f'{number}_{uuid.uuid4()}.png'
 
             # 保存结果
             final_image.save(output_dir / output_name)
@@ -84,32 +480,6 @@ class ImageProcessor:
 
         except Exception as e:
             raise Exception(f"Error processing image {image_path}: {str(e)}")
-
-    def resize_and_center(self, image: Image.Image, margin_ratio: float = 0.1) -> Image.Image:
-        """调整图片大小并居中"""
-        img = image.convert("RGBA")
-        img_width, img_height = img.size
-
-        # 计算目标区域大小
-        margin = int(min(self.canvas_size) * margin_ratio)
-        target_width = self.canvas_size[0] - 2 * margin
-        target_height = self.canvas_size[1] - 2 * margin
-
-        # 计算缩放比例 - 调整为更合适的大小
-        scale = min(target_width/img_width, target_height/img_height)
-        scale = min(max(scale, 0.6), 0.85)  # 调整缩放范围
-
-        # 调整图片大小
-        new_width = int(img_width * scale)
-        new_height = int(img_height * scale)
-        img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-
-        # 创建白色背景
-        background = Image.new("RGBA", self.canvas_size, (255, 255, 255, 255))
-        offset = ((self.canvas_size[0] - new_width) // 2,
-                 (self.canvas_size[1] - new_height) // 2)
-        background.paste(img, offset, img)
-        return background, offset, (new_width, new_height)
 
     def create_dimension_image(self, image: Image.Image) -> Image.Image:
         """创建带尺寸标注的图片"""
@@ -275,7 +645,9 @@ def process_images(zip_url: str, dimensions_str: str) -> str:
     # 设置工作目录
     temp_dir = Path("temp")
     output_dir = Path("processed_images")
-    output_zip = "processed_images.zip"
+    # 使用UUID生成唯一的输出文件名
+    unique_id = uuid.uuid4()
+    output_zip = f"processed_images_{unique_id}.zip"
     
     try:
         # 创建必要的目录

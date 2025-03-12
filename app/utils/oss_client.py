@@ -1,6 +1,7 @@
 import oss2
+import logging
+from typing import Optional
 import os
-import time
 from pathlib import Path
 from app.config.settings import (
     OSS_ACCESS_KEY_ID,
@@ -9,60 +10,82 @@ from app.config.settings import (
     OSS_BUCKET_NAME
 )
 
+logger = logging.getLogger(__name__)
+
 class OSSClient:
-    _instance = None
+    def __init__(self):
+        # 从环境变量获取配置
+        self.access_key_id = os.getenv('OSS_ACCESS_KEY_ID')
+        self.access_key_secret = os.getenv('OSS_ACCESS_KEY_SECRET')
+        self.endpoint = os.getenv('OSS_ENDPOINT')
+        self.bucket_name = os.getenv('OSS_BUCKET_NAME')
+        self.base_url = os.getenv('OSS_BASE_URL')
 
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super(OSSClient, cls).__new__(cls)
-            cls._instance._init_oss()
-        return cls._instance
+        if not all([self.access_key_id, self.access_key_secret, self.endpoint, self.bucket_name]):
+            logger.warning("OSS configuration incomplete")
+            return
 
-    def _init_oss(self):
-        """初始化OSS客户端"""
-        if not all([OSS_ACCESS_KEY_ID, OSS_ACCESS_KEY_SECRET]):
-            raise ValueError("OSS credentials not properly configured")
-        
-        # 创建Auth对象
-        self.auth = oss2.Auth(OSS_ACCESS_KEY_ID, OSS_ACCESS_KEY_SECRET)
-        # 创建Bucket对象
-        self.bucket = oss2.Bucket(self.auth, OSS_ENDPOINT, OSS_BUCKET_NAME)
+        # 初始化OSS客户端
+        self.auth = oss2.Auth(self.access_key_id, self.access_key_secret)
+        self.bucket = oss2.Bucket(self.auth, self.endpoint, self.bucket_name)
 
-    def upload_file(self, local_file_path: str | Path, remote_directory: str = 'uploads') -> str:
+    async def upload_file(self, file_path: str, object_name: Optional[str] = None) -> str:
         """
         上传文件到OSS
-        :param local_file_path: 本地文件路径
-        :param remote_directory: 远程目录名
-        :return: 文件的URL
+        
+        Args:
+            file_path: 本地文件路径
+            object_name: OSS对象名称（可选）
+        
+        Returns:
+            str: 文件访问URL
         """
         try:
-            local_file_path = Path(local_file_path)
-            if not local_file_path.exists():
-                raise FileNotFoundError(f"File not found: {local_file_path}")
+            if not os.path.exists(file_path):
+                raise FileNotFoundError(f"File not found: {file_path}")
 
-            # 生成唯一的文件名
-            timestamp = int(time.time())
-            remote_file_name = f"{remote_directory}/{timestamp}_{local_file_path.name}"
+            # 如果没有指定对象名称，使用文件名
+            if object_name is None:
+                object_name = os.path.basename(file_path)
 
             # 上传文件
-            with local_file_path.open('rb') as fileobj:
-                self.bucket.put_object(remote_file_name, fileobj)
+            self.bucket.put_object_from_file(object_name, file_path)
 
-            # 生成文件URL
-            return f"https://{OSS_BUCKET_NAME}.{OSS_ENDPOINT}/{remote_file_name}"
+            # 返回文件URL
+            if self.base_url:
+                return f"{self.base_url.rstrip('/')}/{object_name}"
+            else:
+                return f"https://{self.bucket_name}.{self.endpoint}/{object_name}"
 
         except Exception as e:
-            raise Exception(f"Failed to upload file to OSS: {str(e)}")
+            logger.error(f"Error uploading file to OSS: {str(e)}")
+            raise
 
-    def delete_file(self, remote_file_path: str) -> None:
+    async def delete_file(self, object_name: str) -> bool:
         """
-        删除OSS上的文件
-        :param remote_file_path: 远程文件路径
+        从OSS删除文件
+        
+        Args:
+            object_name: OSS对象名称
+        
+        Returns:
+            bool: 是否删除成功
         """
         try:
-            self.bucket.delete_object(remote_file_path)
+            self.bucket.delete_object(object_name)
+            return True
         except Exception as e:
-            raise Exception(f"Failed to delete file from OSS: {str(e)}")
+            logger.error(f"Error deleting file from OSS: {str(e)}")
+            return False
+
+    def is_configured(self) -> bool:
+        """检查OSS客户端是否配置完整"""
+        return all([
+            self.access_key_id,
+            self.access_key_secret,
+            self.endpoint,
+            self.bucket_name
+        ])
 
 # 创建全局OSS客户端实例
 oss_client = OSSClient() 
