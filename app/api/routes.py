@@ -627,7 +627,12 @@ async def create_order(request: OrderRequest):
             orderid=request.orderid,
             num=request.num,
             photo=str(request.photo),
-            urgent=request.urgent
+            urgent=request.urgent,
+            delivery=request.delivery,
+            specsCode=request.specsCode,
+            receiverName=request.receiverName,
+            receiverContact=request.receiverContact,
+            receiverAddress=request.receiverAddress
         )
         
         # 调用订单服务

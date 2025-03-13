@@ -16,6 +16,11 @@ class SimpleOrderRequest:
     num: int
     photo: str
     urgent: int = 0  # 默认非加急
+    delivery: int = 0  # 默认配送方式
+    specsCode: str = "SCDPLIVG0001"  # 默认规格代码
+    receiverName: str = "Temu"  # 默认收货人
+    receiverContact: str = "******"  # 默认联系方式
+    receiverAddress: str = "******"  # 默认地址
 
 class OrderService:
     """订单服务类"""
@@ -75,12 +80,12 @@ class OrderService:
                 "urgent": order_request.urgent,
                 # 以下是固定的默认值
                 "buyerNickName": "惠凯",
-                "receiverName": "Temu",
-                "receiverContact": "******",
-                "receiverAddress": "******",
-                "specsCode": "SCDPLIVG0001",
+                "receiverName": order_request.receiverName,  # 使用用户输入或默认值
+                "receiverContact": order_request.receiverContact,  # 使用用户输入或默认值
+                "receiverAddress": order_request.receiverAddress,  # 使用用户输入或默认值
+                "specsCode": order_request.specsCode,  # 使用用户输入或默认值
                 "orderRemark": f"temu仓库-{unique_orderid}-{order_request.num}件",
-                "delivery": 0,
+                "delivery": order_request.delivery,  # 使用用户输入或默认值
                 "designNoticeTel": None,
                 "buyerTel": None
             }
