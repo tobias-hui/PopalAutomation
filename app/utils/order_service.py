@@ -84,7 +84,7 @@ class OrderService:
                 "receiverContact": order_request.receiverContact,  # 使用用户输入或默认值
                 "receiverAddress": order_request.receiverAddress,  # 使用用户输入或默认值
                 "specsCode": order_request.specsCode,  # 使用用户输入或默认值
-                "orderRemark": f"temu仓库-{unique_orderid}-{order_request.num}件",
+                "orderRemark": f"{order_request.receiverName}-{unique_orderid}-{order_request.num}件",
                 "delivery": order_request.delivery,  # 使用用户输入或默认值
                 "designNoticeTel": None,
                 "buyerTel": None
