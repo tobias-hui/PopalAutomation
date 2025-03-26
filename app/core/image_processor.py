@@ -12,73 +12,18 @@ from typing import Dict, Tuple, Optional
 from app.config.settings import CANVAS_SIZE
 import json
 import logging
-from abc import ABC, abstractmethod
 import tempfile
 import uuid
 from tempfile import TemporaryDirectory
 from app.utils.oss_client import oss_client
+from app.core.product_info_processor import ProductInfoProcessor, ProductShotsProcessor
+from app.core.base_processor import BaseImageProcessor, DEFAULT_CANVAS_SIZE, DEFAULT_DRAW_AREA
 
 # 配置日志
 logger = logging.getLogger(__name__)
 
-# 默认画布大小
-DEFAULT_CANVAS_SIZE = (1000, 1000)
-DEFAULT_DRAW_AREA = {
-    'x': 100,
-    'y': 100,
-    'width': 800,
-    'height': 800
-}
-
 # 字体路径配置
 FONT_DIR = Path(__file__).parent.parent / "assets" / "fonts"
-
-class BaseImageProcessor(ABC):
-    """图片处理器基类"""
-    def __init__(self, canvas_size: Tuple[int, int] = DEFAULT_CANVAS_SIZE):
-        self.canvas_size = canvas_size
-        self.draw_area = DEFAULT_DRAW_AREA.copy()
-
-    def resize_and_center(self, image: Image.Image) -> Image.Image:
-        """调整图片大小并居中"""
-        # 保持原始图片模式（包括透明背景）
-        canvas = Image.new(image.mode, image.size, (255, 255, 255, 0) if image.mode == 'RGBA' else (255, 255, 255))
-        canvas.paste(image, (0, 0))
-        return canvas
-
-    def _detect_product_bounds(self, image: Image.Image) -> Tuple[int, int, int, int]:
-        """检测产品边界"""
-        try:
-            # 确保图片是RGBA模式
-            if image.mode != 'RGBA':
-                image = image.convert('RGBA')
-            
-            # 转换为numpy数组
-            img_array = np.array(image)
-            
-            # 使用alpha通道检测产品边界
-            alpha = img_array[:, :, 3]
-            rows = np.any(alpha > 0, axis=1)
-            cols = np.any(alpha > 0, axis=0)
-            
-            # 获取边界
-            ymin, ymax = np.where(rows)[0][[0, -1]]
-            xmin, xmax = np.where(cols)[0][[0, -1]]
-            
-            return (xmin, ymin, xmax - xmin + 1, ymax - ymin + 1)
-            
-        except Exception as e:
-            print(f"检测产品边界时出错: {str(e)}")
-            # 如果检测失败，返回图片中心区域
-            width, height = image.size
-            center_x = width // 2
-            center_y = height // 2
-            return (center_x - 100, center_y - 100, 200, 200)
-
-    @abstractmethod
-    def process_image(self, image: Image.Image) -> Image.Image:
-        """处理图片的抽象方法"""
-        pass
 
 class WhiteBackgroundProcessor(BaseImageProcessor):
     """白色背景处理器"""
@@ -483,6 +428,223 @@ class CarouselImageProcessor(BaseImageProcessor):
 
         except Exception as e:
             logger.error(f"Error processing ZIP file: {str(e)}")
+            raise
+
+    async def process_info_zip(self, zip_data: BytesIO, product_info: dict) -> Dict[str, str]:
+        """处理产品信息相关的ZIP文件
+        Args:
+            zip_data: ZIP文件数据
+            product_info: 产品信息字典，包含title, pcs, height_cm, length_cm等信息
+        Returns:
+            包含处理后的ZIP文件URL的字典，包括：
+            - output_url: 原始轮播图处理结果（1-6.png）
+            - info_url: 产品信息处理结果（1-6.png）
+            - rotating_video_url: 旋转视频URL
+            - falling_bricks_video_url: 掉落砖块视频URL
+        """
+        try:
+            # 创建临时目录
+            with TemporaryDirectory() as temp_dir:
+                temp_dir_path = Path(temp_dir)
+                logger.info(f"Created temporary directory for info processing: {temp_dir_path}")
+
+                # 解压ZIP文件
+                with zipfile.ZipFile(zip_data, 'r') as zip_ref:
+                    zip_ref.extractall(temp_dir_path)
+                logger.info(f"Extracted ZIP file to: {temp_dir_path}")
+
+                # 处理透明背景图片
+                transparent_dir = temp_dir_path / "media" / "image" / "transparent_bg_images"
+                scene_dir = temp_dir_path / "media" / "image" / "scene_bg_images"
+                
+                # 初始化两个处理结果列表
+                output_files = []  # 用于output_url的ZIP文件
+                info_files = []    # 用于info_url的ZIP文件
+
+                # 1. 处理原始轮播图（output_url）
+                # 处理1-5.png
+                for i in range(1, 6):
+                    img_path = transparent_dir / f"{i}.png"
+                    if not img_path.exists():
+                        logger.warning(f"Image {i}.png not found in transparent_bg_images")
+                        continue
+
+                    try:
+                        logger.info(f"Processing image for output: {img_path}")
+                        with Image.open(img_path) as img:
+                            # 2.png使用DimensionProcessor，其他使用WhiteBackgroundProcessor
+                            if i == 2 and self.dimension_processor:
+                                processed_img = self.dimension_processor.process_image(img)
+                            else:
+                                processed_img = self.white_bg_processor.process_image(img)
+                            
+                            # 将处理后的图片转换为字节流
+                            img_byte_arr = BytesIO()
+                            processed_img.save(img_byte_arr, format='PNG')
+                            img_byte_arr.seek(0)
+                            output_files.append((f"{i}.png", img_byte_arr.getvalue()))
+                        logger.info(f"Successfully processed {i}.png for output")
+                    except Exception as e:
+                        logger.error(f"Error processing {i}.png for output: {str(e)}")
+                        raise
+
+                # 处理6.png（如果存在）
+                if scene_dir.exists():
+                    scene_images = list(scene_dir.glob("*.png"))
+                    if scene_images:
+                        img_path = scene_images[0]  # 使用第一个场景图片
+                        try:
+                            logger.info(f"Processing scene image for output: {img_path}")
+                            with Image.open(img_path) as img:
+                                processed_img = self.white_bg_processor.process_image(img)
+                                img_byte_arr = BytesIO()
+                                processed_img.save(img_byte_arr, format='PNG')
+                                img_byte_arr.seek(0)
+                                output_files.append(("6.png", img_byte_arr.getvalue()))
+                            logger.info(f"Successfully processed scene image as 6.png for output")
+                        except Exception as e:
+                            logger.error(f"Error processing scene image for output: {str(e)}")
+                            raise
+
+                # 2. 处理产品信息图片（info_url）
+                # 复制 info_1.png 模板
+                info_template_path = Path(__file__).parent.parent / 'assets' / 'templates' / 'info_1.png'
+                if info_template_path.exists():
+                    with open(info_template_path, 'rb') as f:
+                        info_files.append(("1.png", f.read()))
+                    logger.info("Added info_1.png template as 1.png for info")
+                else:
+                    logger.warning(f"Info template not found: {info_template_path}")
+
+                # 处理产品信息图片 (4.png)
+                product_image_path = temp_dir_path / product_info['product_image_path']
+                if product_image_path.exists():
+                    try:
+                        # 创建产品信息处理器，使用临时目录中的图片路径
+                        info_processor = ProductInfoProcessor({
+                            **product_info,
+                            'product_image_path': str(product_image_path)
+                        })
+                        
+                        # 处理图片，使用默认模板
+                        processed_img = info_processor.process_image()
+                        
+                        # 将处理后的图片转换为字节流
+                        img_byte_arr = BytesIO()
+                        processed_img.save(img_byte_arr, format='PNG')
+                        img_byte_arr.seek(0)
+                        info_files.append(("4.png", img_byte_arr.getvalue()))
+                        logger.info("Successfully processed product info image as 4.png for info")
+                    except Exception as e:
+                        logger.error(f"Error processing product info image for info: {str(e)}")
+                        raise  # 抛出异常以便上层代码处理
+                else:
+                    error_msg = f"Product image not found: {product_image_path}"
+                    logger.error(error_msg)
+                    raise FileNotFoundError(error_msg)
+
+                # 处理产品多角度展示图片 (5.png)
+                shots_images = [
+                    transparent_dir / "1.png",
+                    transparent_dir / "3.png",
+                    transparent_dir / "2.png"
+                ]
+                if all(img.exists() for img in shots_images):
+                    try:
+                        # 创建产品多角度展示处理器，使用原始透明背景图片
+                        shots_processor = ProductShotsProcessor([str(img) for img in shots_images])
+                        processed_img = shots_processor.process_image()
+                        
+                        # 将处理后的图片转换为字节流
+                        img_byte_arr = BytesIO()
+                        processed_img.save(img_byte_arr, format='PNG')
+                        img_byte_arr.seek(0)
+                        info_files.append(("5.png", img_byte_arr.getvalue()))
+                        logger.info("Successfully processed product shots image as 5.png for info")
+                    except Exception as e:
+                        logger.error(f"Error processing product shots image for info: {str(e)}")
+                        raise
+                else:
+                    logger.warning("Some product shots images are missing")
+
+                # 复制 info_6.png 模板
+                info_6_template_path = Path(__file__).parent.parent / 'assets' / 'templates' / 'info_6.png'
+                if info_6_template_path.exists():
+                    with open(info_6_template_path, 'rb') as f:
+                        info_files.append(("6.png", f.read()))
+                    logger.info("Added info_6.png template as 6.png for info")
+                else:
+                    logger.warning(f"Info 6 template not found: {info_6_template_path}")
+
+                # 创建两个ZIP文件
+                output_zip = temp_dir_path / "processed.zip"
+                info_zip = temp_dir_path / "info_processed.zip"
+
+                # 创建output_url的ZIP文件
+                with zipfile.ZipFile(output_zip, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                    for filename, img_data in output_files:
+                        zipf.writestr(filename, img_data)
+                logger.info(f"Created output ZIP file: {output_zip}")
+
+                # 创建info_url的ZIP文件
+                with zipfile.ZipFile(info_zip, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                    for filename, img_data in info_files:
+                        zipf.writestr(filename, img_data)
+                logger.info(f"Created info ZIP file: {info_zip}")
+
+                # 验证ZIP文件
+                if not output_zip.exists() or not info_zip.exists():
+                    raise FileNotFoundError("Output ZIP files not created")
+                
+                if output_zip.stat().st_size == 0 or info_zip.stat().st_size == 0:
+                    raise ValueError("Generated ZIP files are empty")
+
+                # 获取视频文件路径
+                rotating_video_path = temp_dir_path / "media" / "video" / "rotating" / "rotating_video_white_bg.mp4"
+                falling_bricks_video_path = temp_dir_path / "media" / "video" / "falling_bricks" / "falling_bricks_video_white_bg.mp4"
+
+                # 生成唯一的OSS文件名
+                output_zip_filename = f"processed_{uuid.uuid4()}.zip"
+                info_zip_filename = f"info_processed_{uuid.uuid4()}.zip"
+                rotating_video_filename = f"rotating_{uuid.uuid4()}.mp4"
+                falling_bricks_video_filename = f"falling_bricks_{uuid.uuid4()}.mp4"
+
+                # 上传文件到OSS
+                try:
+                    # 上传ZIP文件
+                    output_url = await oss_client.upload_file(str(output_zip), output_zip_filename)
+                    info_url = await oss_client.upload_file(str(info_zip), info_zip_filename)
+                    logger.info(f"Successfully uploaded ZIP files to OSS: {output_url}, {info_url}")
+                    
+                    # 初始化视频URL为None
+                    rotating_video_url = None
+                    falling_bricks_video_url = None
+                    
+                    # 如果视频文件存在，则上传
+                    if rotating_video_path.exists():
+                        rotating_video_url = await oss_client.upload_file(str(rotating_video_path), rotating_video_filename)
+                        logger.info(f"Successfully uploaded rotating video to OSS: {rotating_video_url}")
+                    else:
+                        logger.warning(f"Rotating video file not found: {rotating_video_path}")
+                    
+                    if falling_bricks_video_path.exists():
+                        falling_bricks_video_url = await oss_client.upload_file(str(falling_bricks_video_path), falling_bricks_video_filename)
+                        logger.info(f"Successfully uploaded falling bricks video to OSS: {falling_bricks_video_url}")
+                    else:
+                        logger.warning(f"Falling bricks video file not found: {falling_bricks_video_path}")
+                    
+                    return {
+                        "output_url": output_url,
+                        "info_url": info_url,
+                        "rotating_video_url": rotating_video_url,
+                        "falling_bricks_video_url": falling_bricks_video_url
+                    }
+                except Exception as e:
+                    logger.error(f"Failed to upload files to OSS: {str(e)}")
+                    raise
+
+        except Exception as e:
+            logger.error(f"Error processing info ZIP file: {str(e)}")
             raise
 
 def create_processor(processor_type: str, **kwargs) -> BaseImageProcessor:

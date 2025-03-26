@@ -49,15 +49,19 @@ class CarouselRequest(BaseModel):
     zip_url: HttpUrl
     dimensions_text: str = Field(..., description="尺寸文本")
     task_name: str = Field(..., description="任务名称")
+    title: str = Field(..., description="产品标题")
+    pcs: int = Field(..., description="产品数量")
 
 class ProcessResponse(BaseModel):
     """处理响应模型"""
     task_id: str
     status: str
     output_url: Optional[str] = None
+    info_url: Optional[str] = None
     rotating_video_url: Optional[str] = None
     falling_bricks_video_url: Optional[str] = None
     error: Optional[str] = None
+    created_at: Optional[datetime] = None
 
 class ImageProcessingTask(BaseModel):
     """图片处理任务"""

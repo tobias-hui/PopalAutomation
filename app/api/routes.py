@@ -52,44 +52,124 @@ order_service = OrderService()
 async def process_carousel_background_task(
     task_id: str,
     zip_url: str,
-    dimensions: str,
+    dimensions_text: str,
+    title: str,
+    pcs: int,
     db: Session
 ):
-    """后台处理轮播图"""
+    """后台处理轮播图任务"""
     try:
         # 更新任务状态为处理中
-        await update_task_status(db, task_id, TaskStatus.PROCESSING)
+        task = db.query(Task).filter(Task.task_id == task_id).first()
+        if task:
+            task.status = TaskStatus.PROCESSING
+            task.message = "开始处理轮播图"
+            db.commit()
         
         # 下载ZIP文件
-        async with httpx.AsyncClient() as client:
-            response = await client.get(str(zip_url))
-            if response.status_code != 200:
-                error_msg = f"Failed to download ZIP file: HTTP {response.status_code}"
-                logger.error(error_msg)
-                raise HTTPException(status_code=response.status_code, detail=error_msg)
-            zip_data = BytesIO(response.content)
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(str(zip_url))
+                if response.status_code != 200:
+                    error_msg = f"下载ZIP文件失败: HTTP {response.status_code}"
+                    logger.error(error_msg)
+                    raise HTTPException(status_code=response.status_code, detail=error_msg)
+                zip_data = BytesIO(response.content)
+        except httpx.RequestError as e:
+            error_msg = f"下载ZIP文件时发生网络错误: {str(e)}"
+            logger.error(error_msg)
+            raise HTTPException(status_code=500, detail=error_msg)
+        except Exception as e:
+            error_msg = f"下载ZIP文件时发生未知错误: {str(e)}"
+            logger.error(error_msg)
+            raise HTTPException(status_code=500, detail=error_msg)
         
-        # 处理图片
-        processor = CarouselImageProcessor(dimensions)
-        result = await processor.process_zip(zip_data)
-        
-        # 更新任务状态为完成，并保存结果
-        await update_task_status(
-            db, 
-            task_id, 
-            TaskStatus.COMPLETED,
-            output_url=result.get("output_url"),
-            additional_data={
-                "output_url": result.get("output_url"),
-                "rotating_video_url": result.get("rotating_video_url"),
-                "falling_bricks_video_url": result.get("falling_bricks_video_url")
-            }
-        )
-        
+        # 初始化处理器并处理
+        try:
+            processor = CarouselImageProcessor(dimensions_text=dimensions_text)
+            # 从dimensions_text中获取尺寸信息
+            dimensions = processor.dimensions
+            # 创建临时目录
+            with TemporaryDirectory() as temp_dir:
+                temp_dir = Path(temp_dir)
+                # 将ZIP数据写入临时文件
+                temp_zip = temp_dir / "input.zip"
+                temp_zip.write_bytes(zip_data.getvalue())
+                # 解压ZIP文件
+                with zipfile.ZipFile(temp_zip, 'r') as zip_ref:
+                    zip_ref.extractall(temp_dir)
+                # 使用临时目录中的完整路径
+                product_image_path = str(temp_dir / 'media' / 'image' / 'transparent_bg_images' / '1.png')
+                # 确保 product_info 中的路径是相对路径
+                product_info = {
+                    'title': title,
+                    'pcs': pcs,
+                    'height_cm': dimensions.get('height', 0),
+                    'length_cm': dimensions.get('length', 0),
+                    'product_image_path': 'media/image/transparent_bg_images/1.png'  # 使用相对路径
+                }
+                result = await processor.process_info_zip(zip_data, product_info)
+                
+                # 验证处理结果
+                if not result or not isinstance(result, dict):
+                    raise ValueError("处理结果无效")
+                
+                # 更新任务状态为完成
+                if task:
+                    task.status = TaskStatus.COMPLETED
+                    task.message = "轮播图处理完成"
+                    task.additional_data = {
+                        "output_url": result.get("output_url"),
+                        "info_url": result.get("info_url"),
+                        "rotating_video_url": result.get("rotating_video_url"),
+                        "falling_bricks_video_url": result.get("falling_bricks_video_url"),
+                        "dimensions": dimensions,
+                        "product_info": {
+                            "title": title,
+                            "pcs": pcs,
+                            "height_cm": dimensions.get('height', 0),
+                            "length_cm": dimensions.get('length', 0)
+                        }
+                    }
+                    db.commit()
+                
+                return result
+                
+        except ValueError as e:
+            error_msg = f"处理结果验证失败: {str(e)}"
+            logger.error(error_msg)
+            raise HTTPException(status_code=400, detail=error_msg)
+        except HTTPException as e:
+            logger.error(f"处理轮播图任务 {task_id} 时发生HTTP错误: {str(e)}")
+            # 更新任务状态为失败
+            task = db.query(Task).filter(Task.task_id == task_id).first()
+            if task:
+                task.status = TaskStatus.FAILED
+                task.message = f"处理失败: {str(e.detail)}"
+                task.error = str(e.detail)
+                db.commit()
+            raise e
+        except Exception as e:
+            error_msg = f"处理ZIP文件失败: {str(e)}"
+            logger.error(error_msg)
+            # 更新任务状态为失败
+            task = db.query(Task).filter(Task.task_id == task_id).first()
+            if task:
+                task.status = TaskStatus.FAILED
+                task.message = f"处理失败: {str(e)}"
+                task.error = str(e)
+                db.commit()
+            raise HTTPException(status_code=500, detail=error_msg)
     except Exception as e:
-        logger.error(f"处理轮播图时出错: {str(e)}")
-        await update_task_status(db, task_id, TaskStatus.FAILED, error=str(e))
-        raise
+        logger.error(f"处理轮播图任务 {task_id} 时发生未知错误: {str(e)}")
+        # 更新任务状态为失败
+        task = db.query(Task).filter(Task.task_id == task_id).first()
+        if task:
+            task.status = TaskStatus.FAILED
+            task.message = f"处理失败: {str(e)}"
+            task.error = str(e)
+            db.commit()
+        raise HTTPException(status_code=500, detail=str(e))
 
 async def update_task_status(
     db: Session, 
@@ -134,12 +214,19 @@ async def process_carousel(
         db.commit()
         
         # 添加后台任务
-        background_tasks.add_task(process_carousel_background_task, task_id, request.zip_url, request.dimensions_text, db)
+        background_tasks.add_task(
+            process_carousel_background_task, 
+            task_id, 
+            request.zip_url, 
+            request.dimensions_text,
+            request.title,
+            request.pcs,
+            db
+        )
         
         return ProcessResponse(
             task_id=task_id,
             status="pending",
-            message="轮播图处理任务已提交",
             created_at=task.created_at
         )
         

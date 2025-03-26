@@ -50,5 +50,5 @@ class Task(Base):
             "completed_at": self.completed_at,
             "output_url": self.output_url,
             "error": self.error,
-            "result": self.additional_data
+            "result": self.additional_data if self.additional_data else None
         } 

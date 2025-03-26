@@ -3,9 +3,8 @@ from PIL import Image, ImageDraw, ImageFont
 import os
 import logging
 import numpy as np
-from abc import ABC, abstractmethod
-from .image_processor import BaseImageProcessor
 from pathlib import Path
+from .base_processor import BaseImageProcessor
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -72,23 +71,6 @@ class ProductInfoProcessor(BaseImageProcessor):
             self.dimension_font = ImageFont.load_default()
 
     @staticmethod
-    def get_non_transparent_bounds(image: Image.Image) -> Optional[Tuple[int, int, int, int]]:
-        """获取图片中非透明区域的边界"""
-        img_array = np.array(image)
-        alpha = img_array[:, :, 3]
-        non_transparent_pixels = np.where(alpha > 0)
-        
-        if len(non_transparent_pixels[0]) == 0:
-            return None
-        
-        return (
-            non_transparent_pixels[1].min(),  # left
-            non_transparent_pixels[0].min(),  # top
-            non_transparent_pixels[1].max(),  # right
-            non_transparent_pixels[0].max()   # bottom
-        )
-
-    @staticmethod
     def format_dimension(value_cm: float) -> str:
         """将厘米数值转换为显示格式"""
         inch_value = value_cm / 2.54
@@ -124,9 +106,11 @@ class ProductInfoProcessor(BaseImageProcessor):
         if 'product_image_path' in self.product_info:
             try:
                 product_image = Image.open(self.product_info['product_image_path'])
-                bounds = self.get_non_transparent_bounds(product_image)
+                bounds = self._detect_product_bounds(product_image)
                 if bounds:
-                    product_image = product_image.crop(bounds)
+                    # 将边界框格式从 (x, y, width, height) 转换为 (left, top, right, bottom)
+                    x, y, w, h = bounds
+                    product_image = product_image.crop((x, y, x + w, y + h))
                     product_image = self.scale_product_by_real_size(
                         product_image, 
                         self.product_info['height_cm']
@@ -150,6 +134,7 @@ class ProductInfoProcessor(BaseImageProcessor):
                     image.paste(product_image, (center_x, bottom_y), product_image)
             except Exception as e:
                 logger.error(f"处理产品图片时出错: {str(e)}")
+                raise  # 添加 raise 以便更好地追踪错误
         
         # 添加文本信息
         draw.text(self.text_positions['title'], self.product_info['title'], 
@@ -176,5 +161,106 @@ class ProductInfoProcessor(BaseImageProcessor):
         txt_rotated = txt.rotate(90, expand=True)
         
         image.paste(txt_rotated, self.text_positions['height'], txt_rotated)
+        
+        return image
+
+class ProductShotsProcessor(BaseImageProcessor):
+    """产品多角度展示处理器"""
+    def __init__(self, product_images: list, canvas_size: Tuple[int, int] = (790, 1196)):
+        """
+        初始化产品多角度展示处理器
+        Args:
+            product_images: 包含三张产品图片路径的列表，例如：
+                [
+                    'path/to/product1.png',
+                    'path/to/product2.png',
+                    'path/to/product3.png'
+                ]
+        """
+        super().__init__(canvas_size)
+        if len(product_images) != 3:
+            raise ValueError("必须提供3张产品图片")
+        self.product_images = product_images
+        
+        # 定义三个可绘制区域
+        self.draw_boxes = [
+            {
+                'x': 200,
+                'y': 280,
+                'width': 400,
+                'height': 400
+            },
+            {
+                'x': 0,
+                'y': 772,
+                'width': 380,
+                'height': 380
+            },
+            {
+                'x': 410,
+                'y': 772,
+                'width': 380,
+                'height': 380
+            }
+        ]
+
+    def scale_and_center_image(self, image: Image.Image, target_box: dict) -> Image.Image:
+        """缩放并居中图片到目标区域"""
+        # 获取非透明区域边界
+        bounds = self._detect_product_bounds(image)
+        if not bounds:
+            return image
+            
+        # 裁剪非透明区域
+        x, y, w, h = bounds
+        cropped_image = image.crop((x, y, x + w, y + h))
+        
+        # 计算缩放比例
+        width_ratio = target_box['width'] / cropped_image.width
+        height_ratio = target_box['height'] / cropped_image.height
+        scale_ratio = min(width_ratio, height_ratio)
+        
+        # 计算缩放后的尺寸
+        new_width = int(cropped_image.width * scale_ratio)
+        new_height = int(cropped_image.height * scale_ratio)
+        
+        # 缩放图片
+        scaled_image = cropped_image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+        
+        return scaled_image
+
+    def process_image(self, image: Optional[Image.Image] = None) -> Image.Image:
+        """
+        处理产品多角度展示模板图片
+        Args:
+            image: 可选的基础图片，如果不提供则使用默认模板
+        Returns:
+            处理后的图片
+        """
+        # 加载基础模板
+        if image is None:
+            template_path = Path(__file__).parent.parent / 'assets' / 'templates' / 'ShotsBasic.png'
+            if not template_path.exists():
+                raise FileNotFoundError(f"Template not found: {template_path}")
+            image = Image.open(template_path)
+        
+        # 处理三张产品图片
+        for i, (product_image_path, box) in enumerate(zip(self.product_images, self.draw_boxes)):
+            try:
+                # 打开产品图片
+                product_image = Image.open(product_image_path)
+                
+                # 缩放并居中图片
+                scaled_image = self.scale_and_center_image(product_image, box)
+                
+                # 计算居中位置
+                center_x = box['x'] + (box['width'] - scaled_image.width) // 2
+                center_y = box['y'] + (box['height'] - scaled_image.height) // 2
+                
+                # 粘贴产品图片
+                image.paste(scaled_image, (center_x, center_y), scaled_image)
+                
+            except Exception as e:
+                logger.error(f"处理第{i+1}张产品图片时出错: {str(e)}")
         
         return image 
