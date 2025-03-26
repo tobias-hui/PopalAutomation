@@ -305,14 +305,20 @@ class CarouselImageProcessor(BaseImageProcessor):
         ) if self.dimensions else None
 
     def _parse_dimensions_text(self, text: str) -> Dict:
-        """解析尺寸文本，提取高度和长度值"""
+        """解析尺寸文本，提取高度和长度值
+        支持的格式：
+        1. 带空格或不带空格: "Length: 5.8" 或 "Length:5.8"
+        2. 大小写不敏感: "LENGTH", "Length", "length" 都可以
+        3. 带单位或不带单位: "5.8cm" 或 "5.8"
+        4. 单位前后可有空格: "5.8 cm" 或 "5.8cm"
+        """
         if not text:
             logger.warning("Empty dimensions text provided")
             return {}
 
         try:
-            # 提取维度信息
-            pattern = r'(Length|Height):(\d+\.?\d*)'
+            # 提取维度信息 - 支持多种格式
+            pattern = r'(Length|Width|Height)\s*:\s*(\d+\.?\d*)\s*(?:cm)?'
             matches = re.findall(pattern, text, re.IGNORECASE)
             
             if not matches:
