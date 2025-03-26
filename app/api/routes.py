@@ -5,36 +5,37 @@ from typing import List, Optional, Dict
 import logging
 from datetime import datetime, timedelta
 import uuid
-from app.core.image_processor import process_images, ImageProcessor
+from pathlib import Path
+import os
+import json
+from tempfile import TemporaryDirectory
+from io import BytesIO
+import zipfile
+from zipfile import ZipFile, BadZipFile
+import httpx
+
+from app.core.image_processor import (
+    DimensionProcessor,
+    CarouselImageProcessor,
+    WhiteBackgroundProcessor
+)
+from app.core.product_info_processor import ProductInfoProcessor
 from app.utils.oss_client import oss_client
 from app.utils.order_service import OrderService, SimpleOrderRequest
 from app.models.order_models import OrderRequest, OrderResponse
 from app.core.database import get_db
-from app.models.task_models import Task, serialize_request_data
+from app.models.task_models import Task, serialize_request_data, TaskStatus
 from sqlalchemy.orm import Session
-from pathlib import Path
-import os
-import json
-import aiohttp
-from tempfile import TemporaryDirectory
-from PIL import Image
-from io import BytesIO
-import zipfile
-import aiofiles
-import hashlib
-import time
-from zipfile import ZipFile, BadZipFile
 
 from app.models.image_models import (
     DimensionImageRequest,
     CarouselRequest,
     ProcessResponse,
-    ImageProcessingTask,
-    DimensionSet,
     TaskQueryResponse,
-    UploadResponse
+    UploadResponse,
+    WhiteBackgroundRequest,
+    ProductInfoRequest
 )
-from app.core.image_processor import create_processor
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -45,131 +46,63 @@ router = APIRouter()
 # 创建订单服务实例
 order_service = OrderService()
 
-async def process_carousel_background(task_id: str, request: CarouselRequest, db: Session):
+async def process_carousel_background_task(
+    task_id: str,
+    zip_url: str,
+    dimensions: str,
+    db: Session
+):
     """后台处理轮播图"""
     try:
         # 更新任务状态为处理中
-        task = db.query(Task).filter(Task.task_id == task_id).first()
-        task.status = "processing"
-        task.message = "Processing carousel images..."
-        db.commit()
+        await update_task_status(db, task_id, TaskStatus.PROCESSING)
         
-        # 解析尺寸文本
-        dimensions = {}
-        if request.dimensions_text:
-            # 解析格式如 "Length:11.2cmWidth:10.4cmHeight:13.1cm"
-            dim_parts = request.dimensions_text.lower().replace('cm', ' cm').split()
-            for part in dim_parts:
-                if ':' in part:
-                    key, value = part.split(':')
-                    if key.lower() in ['length', 'width', 'height']:
-                        dimensions[key.lower()] = float(value)
+        # 下载ZIP文件
+        zip_data = BytesIO(httpx.get(zip_url).content)
         
-        # 创建处理器
-        dimension_processor = create_processor(
-            'dimension',
-            dimensions={
-                "length": {
-                    "value": dimensions.get("length", 0),
-                    "unit": "cm",
-                    "inch": round(dimensions.get("length", 0) / 2.54, 2)
-                },
-                "width": {
-                    "value": dimensions.get("width", 0),
-                    "unit": "cm", 
-                    "inch": round(dimensions.get("width", 0) / 2.54, 2)
-                },
-                "height": {
-                    "value": dimensions.get("height", 0),
-                    "unit": "cm",
-                    "inch": round(dimensions.get("height", 0) / 2.54, 2)
-                }
+        # 处理图片
+        processor = CarouselImageProcessor(dimensions)
+        result = await processor.process_zip(zip_data)
+        
+        # 更新任务状态为完成，并保存结果
+        await update_task_status(
+            db, 
+            task_id, 
+            TaskStatus.COMPLETED,
+            output_url=result.get("output_url"),
+            additional_data={
+                "output_url": result.get("output_url"),
+                "rotating_video_url": result.get("rotating_video_url"),
+                "falling_bricks_video_url": result.get("falling_bricks_video_url")
             }
-        ) if dimensions else None
+        )
         
-        # 创建临时目录
-        with TemporaryDirectory() as temp_dir:
-            temp_dir = Path(temp_dir)
-            output_dir = temp_dir / "output"
-            output_dir.mkdir(exist_ok=True)
-            
-            # 下载ZIP文件
-            async with aiohttp.ClientSession() as session:
-                async with session.get(request.zip_url) as response:
-                    if response.status != 200:
-                        raise HTTPException(status_code=response.status, detail="Failed to download ZIP file")
-                    zip_data = await response.read()
-            
-            # 保存ZIP文件
-            zip_path = temp_dir / "input.zip"
-            zip_path.write_bytes(zip_data)
-            
-            # 处理ZIP文件中的图片
-            with ZipFile(zip_path, 'r') as zip_ref:
-                image_files = [f for f in zip_ref.namelist() if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
-                image_files.sort()  # 确保文件顺序
-                
-                for image_file in image_files:
-                    # 提取图片
-                    with zip_ref.open(image_file) as f:
-                        img_data = f.read()
-                        img = Image.open(BytesIO(img_data)).convert("RGBA")
-                        
-                        # 根据文件名决定处理方式
-                        filename = Path(image_file).stem.lower()  # 只获取文件名，不包含扩展名
-                        
-                        # 检查文件名中是否包含 "_2"
-                        if "_2" in filename and dimension_processor:
-                            # 文件名包含"_2"的图片：添加白色背景和尺寸标注
-                            white_bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
-                            white_bg.paste(img, (0, 0), img)
-                            processed_img = dimension_processor.process_image(white_bg)
-                            output_name = f"{Path(image_file).stem}_dimension_{uuid.uuid4()}.png"
-                        # 检查文件名中是否包含其他数字序号（如 _1, _3, _4 等）
-                        elif any(f"_{i}" in filename for i in range(10) if i != 2):
-                            # 其他序号图片：只添加白色背景
-                            white_bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
-                            white_bg.paste(img, (0, 0), img)
-                            processed_img = white_bg
-                            output_name = f"{Path(image_file).stem}_white_{uuid.uuid4()}.png"
-                        else:
-                            # 其他图片：保持原样
-                            processed_img = img
-                            output_name = f"{Path(image_file).stem}_original_{uuid.uuid4()}.png"
-                        
-                        # 保存处理后的图片
-                        output_path = output_dir / output_name
-                        processed_img.save(output_path, "PNG")
-            
-            # 创建新的ZIP文件，使用唯一标识符
-            zip_unique_id = uuid.uuid4()
-            output_zip = temp_dir / f"carousel_images_{zip_unique_id}.zip"
-            with ZipFile(output_zip, 'w') as zip_out:
-                for img_path in output_dir.glob("*.png"):
-                    zip_out.write(img_path, img_path.name)
-            
-            # 上传到OSS，使用唯一的文件名
-            oss_filename = f"carousel_images/carousel_{zip_unique_id}.zip"
-            output_url = await oss_client.upload_file(output_zip, oss_filename)
-            
-            # 更新任务状态为完成
-            task.status = "completed"
-            task.completed_at = datetime.now()
-            task.output_url = output_url
-            task.result = {
-                "total_images": len(image_files),
-                "output_url": output_url,
-                "dimensions": dimensions
-            }
-            db.commit()
-            
     except Exception as e:
-        logger.error(f"Error processing carousel task {task_id}: {str(e)}")
-        task = db.query(Task).filter(Task.task_id == task_id).first()
-        task.status = "failed"
-        task.error = str(e)
-        task.completed_at = datetime.now()
-        task.message = "Task failed - see error for details"
+        logger.error(f"处理轮播图时出错: {str(e)}")
+        await update_task_status(db, task_id, TaskStatus.FAILED, error=str(e))
+        raise
+
+async def update_task_status(
+    db: Session, 
+    task_id: str, 
+    status: TaskStatus, 
+    output_url: str = None, 
+    additional_data: dict = None,
+    error: str = None
+):
+    """更新任务状态"""
+    task = db.query(Task).filter(Task.task_id == task_id).first()
+    if task:
+        task.status = status
+        if output_url:
+            task.output_url = output_url
+        if additional_data:
+            task.additional_data = additional_data
+        if error:
+            task.error = error
+        if status == TaskStatus.COMPLETED:
+            task.completed_at = datetime.utcnow()
+        task.updated_at = datetime.utcnow()
         db.commit()
 
 @router.post("/carousel", response_model=ProcessResponse)
@@ -179,28 +112,31 @@ async def process_carousel(
     db: Session = Depends(get_db)
 ):
     """处理轮播图API端点"""
-    task_id = str(uuid.uuid4())
-    created_at = datetime.now()
-    
-    # 创建新任务记录，序列化请求数据
-    new_task = Task(
-        task_id=task_id,
-        status="pending",
-        created_at=created_at,
-        message="Carousel processing task created successfully",
-        request_data=serialize_request_data(request.dict())
-    )
-    db.add(new_task)
-    db.commit()
-    
-    background_tasks.add_task(process_carousel_background, task_id, request, db)
-    
-    return ProcessResponse(
-        task_id=task_id,
-        status="pending",
-        message="Carousel processing task created successfully",
-        created_at=created_at
-    )
+    try:
+        # 创建任务记录
+        task_id = str(uuid.uuid4())
+        task = Task(
+            task_id=task_id,
+            status=TaskStatus.PENDING,
+            created_at=datetime.utcnow(),
+            message=f"轮播图处理任务已创建"
+        )
+        db.add(task)
+        db.commit()
+        
+        # 添加后台任务
+        background_tasks.add_task(process_carousel_background_task, task_id, request.zip_url, request.dimensions_text, db)
+        
+        return ProcessResponse(
+            task_id=task_id,
+            status="pending",
+            message="轮播图处理任务已提交",
+            created_at=task.created_at
+        )
+        
+    except Exception as e:
+        logger.error(f"Error creating carousel task: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/dimension", response_model=ProcessResponse)
 async def process_dimension(
@@ -209,94 +145,127 @@ async def process_dimension(
     db: Session = Depends(get_db)
 ):
     """处理尺寸图API端点"""
-    task_id = str(uuid.uuid4())
-    created_at = datetime.now()
-    
-    # 创建新任务记录，序列化请求数据
-    new_task = Task(
-        task_id=task_id,
-        status="pending",
-        created_at=created_at,
-        message="Dimension image processing task created successfully",
-        request_data=serialize_request_data(request.dict())
-    )
-    db.add(new_task)
-    db.commit()
-    
-    background_tasks.add_task(process_dimension_background, task_id, request, db)
-    
-    return ProcessResponse(
-        task_id=task_id,
-        status="pending",
-        message="Dimension image processing task created successfully",
-        created_at=created_at
-    )
+    try:
+        # 创建任务记录
+        task_id = str(uuid.uuid4())
+        task = Task(
+            task_id=task_id,
+            status=TaskStatus.PENDING,
+            created_at=datetime.utcnow(),
+            message="尺寸图处理任务已创建",
+            request_data=serialize_request_data(request.dict())
+        )
+        db.add(task)
+        db.commit()
+        
+        # 添加后台任务
+        background_tasks.add_task(process_dimension_background, task_id, request, db)
+        
+        return ProcessResponse(
+            task_id=task_id,
+            status="pending",
+            message="尺寸图处理任务已提交",
+            created_at=task.created_at
+        )
+        
+    except Exception as e:
+        logger.error(f"Error creating dimension task: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 async def process_dimension_background(task_id: str, request: DimensionImageRequest, db: Session):
     """后台处理尺寸图"""
     try:
         # 更新任务状态为处理中
-        task = db.query(Task).filter(Task.task_id == task_id).first()
-        task.status = "processing"
-        task.message = "Processing dimension image..."
-        db.commit()
-
-        async with aiohttp.ClientSession() as session:
-            async with session.get(str(request.image_url)) as response:
-                if response.status != 200:
-                    raise HTTPException(status_code=response.status, detail="Failed to download image")
-                image_data = await response.read()
-
+        await update_task_status(db, task_id, TaskStatus.PROCESSING)
+        
+        # 创建处理器
+        processor = DimensionProcessor(
+            length=request.length,
+            height=request.height
+        )
+        
+        # 下载图片
+        async with httpx.AsyncClient() as client:
+            response = await client.get(str(request.image_url))
+            if response.status_code != 200:
+                error_msg = f"Failed to download image: HTTP {response.status_code}"
+                logger.error(error_msg)
+                raise HTTPException(status_code=response.status_code, detail=error_msg)
+            image_data = response.content
+        
+        # 处理图片
+        try:
+            with Image.open(BytesIO(image_data)) as img:
+                # 验证图片格式和通道
+                if img.mode not in ['RGBA', 'LA']:
+                    error_msg = "Image must have an alpha channel (RGBA or LA mode)"
+                    logger.error(error_msg)
+                    raise ValueError(error_msg)
+                
+                # 验证图片尺寸
+                if img.size[0] < 100 or img.size[1] < 100:  # 最小尺寸限制
+                    error_msg = "Image dimensions too small"
+                    logger.error(error_msg)
+                    raise ValueError(error_msg)
+                
+                # 处理图片
+                result = processor.process_image(img)
+                
+                # 验证处理结果
+                if result is None or result.size != processor.canvas_size:
+                    error_msg = "Image processing failed: invalid output"
+                    logger.error(error_msg)
+                    raise ValueError(error_msg)
+        except Exception as e:
+            error_msg = f"Error processing image: {str(e)}"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        
+        # 创建临时目录保存处理后的图片
         with TemporaryDirectory() as temp_dir:
             temp_dir = Path(temp_dir)
-            image_path = temp_dir / "original.png"
-            unique_id = uuid.uuid4()
-            output_path = temp_dir / f"dimension_{unique_id}.png"
-
-            # 保存原始图片
-            image_path.write_bytes(image_data)
-
+            output_path = temp_dir / f"processed_{task_id}.png"
+            
+            # 保存处理后的图片
             try:
-                # 创建处理器并处理图片
-                processor = create_processor(
-                    'dimension',
-                    dimensions=request.dimensions.to_processor_format()
-                )
-
-                with Image.open(image_path).convert("RGBA") as original_image:
-                    final_image = processor.process_image(original_image)
-                    final_image.save(output_path)
-
-                # 上传到OSS
-                oss_filename = f"dimension_images/dimension_{unique_id}.png"
-                output_url = await oss_client.upload_file(output_path, oss_filename)
-
-                # 更新任务状态为完成
-                task.status = "completed"
-                task.completed_at = datetime.now()
-                task.output_url = output_url
-                task.message = "Image processing completed successfully"
-                task.result = {
-                    "original_size": os.path.getsize(image_path),
-                    "processed_size": os.path.getsize(output_path),
-                    "dimensions": request.dimensions.dict(),
-                    "output_url": output_url
-                }
-                db.commit()
-
+                result.save(output_path, "PNG")
             except Exception as e:
-                logger.error(f"Error in image processing: {str(e)}")
-                raise Exception(f"Image processing failed: {str(e)}")
-
-    except Exception as e:
+                error_msg = f"Error saving processed image: {str(e)}"
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+            
+            # 生成OSS对象名称
+            oss_filename = f"processed_images/dimension_{task_id}.png"
+            
+            # 上传到OSS
+            try:
+                output_url = await oss_client.upload_file(str(output_path), oss_filename)
+                logger.info(f"Successfully uploaded processed image to OSS: {output_url}")
+            except Exception as e:
+                error_msg = f"Error uploading to OSS: {str(e)}"
+                logger.error(error_msg)
+                raise HTTPException(status_code=500, detail=error_msg)
+            
+            # 更新任务状态为完成
+            await update_task_status(db, task_id, TaskStatus.COMPLETED, output_url)
+            
+            return {"status": "success", "output_url": output_url}
+        
+    except ValueError as e:
         error_msg = str(e)
-        logger.error(f"Error processing dimension task {task_id}: {error_msg}")
-        task = db.query(Task).filter(Task.task_id == task_id).first()
-        task.status = "failed"
-        task.error = error_msg
-        task.completed_at = datetime.now()
-        task.message = "Task failed - see error for details"
-        db.commit()
+        logger.error(f"Validation error processing dimension image: {error_msg}")
+        await update_task_status(db, task_id, TaskStatus.FAILED, error_msg)
+        raise HTTPException(status_code=400, detail=error_msg)
+    except HTTPException as e:
+        error_msg = str(e.detail)
+        logger.error(f"HTTP error processing dimension image: {error_msg}")
+        await update_task_status(db, task_id, TaskStatus.FAILED, error_msg)
+        raise e
+    except Exception as e:
+        error_msg = f"Unexpected error processing dimension image: {str(e)}"
+        logger.error(error_msg)
+        await update_task_status(db, task_id, TaskStatus.FAILED, error_msg)
+        raise HTTPException(status_code=500, detail=error_msg)
 
 @router.get("/tasks/{task_id}/result")
 async def get_task_result(task_id: str, db: Session = Depends(get_db)):
@@ -549,67 +518,6 @@ async def upload_file(
             detail=f"Error uploading file: {str(e)}"
         )
 
-# 将原有的 upload_zip 标记为弃用
-@router.post("/upload/zip", response_model=UploadResponse, deprecated=True)
-async def upload_zip(file: UploadFile = File(...)):
-    """
-    上传ZIP文件（已弃用，请使用 /upload 接口）
-    """
-    try:
-        # 验证文件类型
-        if file.content_type != 'application/zip':
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid file type. Only ZIP files are allowed."
-            )
-
-        # 创建临时目录
-        with TemporaryDirectory() as temp_dir:
-            temp_file_path = os.path.join(temp_dir, file.filename)
-            
-            # 保存文件到临时目录
-            async with aiofiles.open(temp_file_path, 'wb') as out_file:
-                content = await file.read()
-                await out_file.write(content)
-
-            # 验证ZIP文件
-            try:
-                with ZipFile(temp_file_path, 'r') as zip_ref:
-                    if zip_ref.testzip() is not None:
-                        raise HTTPException(
-                            status_code=400,
-                            detail="Invalid or corrupted ZIP file"
-                        )
-            except BadZipFile:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Invalid ZIP file format"
-                )
-
-            # 获取文件大小
-            file_size = os.path.getsize(temp_file_path)
-
-            # 生成唯一的对象名称
-            timestamp = int(time.time())
-            object_name = f"uploads/zips/{timestamp}_{file.filename}"
-
-            # 上传到OSS
-            file_url = await oss_client.upload_file(temp_file_path, object_name)
-
-            return UploadResponse(
-                file_url=file_url,
-                file_name=file.filename,
-                file_size=file_size,
-                created_at=datetime.now()
-            )
-
-    except Exception as e:
-        logger.error(f"Error uploading ZIP file: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error uploading ZIP file: {str(e)}"
-        )
-
 @router.post("/orders", response_model=OrderResponse)
 async def create_order(request: OrderRequest):
     """
@@ -659,3 +567,150 @@ async def create_order(request: OrderRequest):
             message=f"订单创建失败: {str(e)}",
             data=None
         )
+
+async def process_white_background(task_id: str, request: WhiteBackgroundRequest, db: Session):
+    """后台处理白色背景"""
+    try:
+        # 更新任务状态为处理中
+        await update_task_status(db, task_id, TaskStatus.PROCESSING)
+        
+        # 创建处理器
+        processor = WhiteBackgroundProcessor()
+        
+        # 处理图片
+        result = processor.process_image(request.image)
+        
+        # 保存处理后的图片
+        output_path = f"processed_{task_id}.png"
+        result.save(output_path)
+        
+        # 更新任务状态为完成
+        await update_task_status(db, task_id, TaskStatus.COMPLETED, output_path)
+        
+        return {"status": "success", "output_path": output_path}
+        
+    except Exception as e:
+        logger.error(f"Error processing white background: {str(e)}")
+        await update_task_status(db, task_id, TaskStatus.FAILED, str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+async def process_product_info_background(task_id: str, request: ProductInfoRequest, db: Session):
+    """后台处理产品信息图片"""
+    try:
+        # 更新任务状态为处理中
+        await update_task_status(db, task_id, TaskStatus.PROCESSING)
+        
+        # 创建临时目录
+        with TemporaryDirectory() as temp_dir:
+            temp_dir = Path(temp_dir)
+            input_path = temp_dir / f"input_{task_id}.png"
+            
+            # 下载输入图片
+            async with httpx.AsyncClient() as client:
+                response = await client.get(str(request.image_url))
+                if response.status_code != 200:
+                    error_msg = f"Failed to download image: HTTP {response.status_code}"
+                    logger.error(error_msg)
+                    raise HTTPException(status_code=response.status_code, detail=error_msg)
+                input_path.write_bytes(response.content)
+            
+            # 创建处理器实例
+            processor = ProductInfoProcessor(
+                product_info={
+                    "title": request.title,
+                    "pcs": request.pcs,
+                    "height_cm": request.height_cm,
+                    "length_cm": request.length_cm,
+                    "product_image_path": str(input_path)
+                }
+            )
+            
+            # 处理图片
+            processed_image = processor.process_image()
+            
+            # 保存处理后的图片
+            output_path = temp_dir / f"processed_{task_id}.png"
+            processed_image.save(output_path)
+            
+            # 生成OSS对象名称
+            oss_filename = f"processed_images/product_info_{task_id}.png"
+            
+            # 上传到OSS
+            try:
+                output_url = await oss_client.upload_file(str(output_path), oss_filename)
+                logger.info(f"Successfully uploaded processed image to OSS: {output_url}")
+            except Exception as e:
+                error_msg = f"Error uploading to OSS: {str(e)}"
+                logger.error(error_msg)
+                raise HTTPException(status_code=500, detail=error_msg)
+            
+            # 更新任务状态为完成
+            await update_task_status(
+                db, 
+                task_id, 
+                TaskStatus.COMPLETED,
+                output_url=output_url,
+                additional_data={"output_url": output_url}
+            )
+            
+            return {"status": "success", "output_url": output_url}
+            
+    except ValueError as e:
+        error_msg = str(e)
+        logger.error(f"Validation error processing product info image: {error_msg}")
+        await update_task_status(db, task_id, TaskStatus.FAILED, error=error_msg)
+        raise HTTPException(status_code=400, detail=error_msg)
+    except HTTPException as e:
+        error_msg = str(e.detail)
+        logger.error(f"HTTP error processing product info image: {error_msg}")
+        await update_task_status(db, task_id, TaskStatus.FAILED, error=error_msg)
+        raise e
+    except Exception as e:
+        error_msg = f"Unexpected error processing product info image: {str(e)}"
+        logger.error(error_msg)
+        await update_task_status(db, task_id, TaskStatus.FAILED, error=error_msg)
+        raise HTTPException(status_code=500, detail=error_msg)
+
+@router.post("/product-info", response_model=ProcessResponse)
+async def process_product_info(
+    request: ProductInfoRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
+    """
+    处理产品信息图片API端点
+    
+    Args:
+        request: ProductInfoRequest - 产品信息处理请求
+        background_tasks: BackgroundTasks - FastAPI后台任务
+        db: Session - 数据库会话
+        
+    Returns:
+        ProcessResponse - 处理响应
+    """
+    try:
+        # 创建任务记录
+        task_id = str(uuid.uuid4())
+        task = Task(
+            task_id=task_id,
+            status=TaskStatus.PENDING,
+            created_at=datetime.utcnow(),
+            message="产品信息处理任务已创建",
+            request_data=serialize_request_data(request.dict())
+        )
+        db.add(task)
+        db.commit()
+        
+        # 添加后台任务
+        background_tasks.add_task(process_product_info_background, task_id, request, db)
+        
+        return ProcessResponse(
+            task_id=task_id,
+            status="pending",
+            message="产品信息处理任务已提交",
+            created_at=task.created_at
+        )
+        
+    except Exception as e:
+        logger.error(f"创建产品信息处理任务失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))

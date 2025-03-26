@@ -52,7 +52,11 @@ docker-compose.override.yml
 .DS_Store
 Thumbs.db
 
-image-processing.service
+# Project specific
+output/
+app/tests/
 *.pyc
 *.pyo
 *.tar.gz
+
+image-processing.service

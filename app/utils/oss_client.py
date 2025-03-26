@@ -1,64 +1,51 @@
 import oss2
+from app.config.settings import OSS_CONFIG
 import logging
 from typing import Optional
 import os
 from pathlib import Path
-from app.config.settings import (
-    OSS_ACCESS_KEY_ID,
-    OSS_ACCESS_KEY_SECRET,
-    OSS_ENDPOINT,
-    OSS_BUCKET_NAME
-)
 
 logger = logging.getLogger(__name__)
 
+# 创建 OSS 认证对象
+auth = oss2.Auth(
+    OSS_CONFIG['access_key_id'],
+    OSS_CONFIG['access_key_secret']
+)
+
+# 创建 Bucket 实例
+bucket = oss2.Bucket(
+    auth,
+    OSS_CONFIG['endpoint'],
+    OSS_CONFIG['bucket_name']
+)
+
 class OSSClient:
     def __init__(self):
-        # 从环境变量获取配置
-        self.access_key_id = os.getenv('OSS_ACCESS_KEY_ID')
-        self.access_key_secret = os.getenv('OSS_ACCESS_KEY_SECRET')
-        self.endpoint = os.getenv('OSS_ENDPOINT')
-        self.bucket_name = os.getenv('OSS_BUCKET_NAME')
-        self.base_url = os.getenv('OSS_BASE_URL')
+        self.bucket = bucket
 
-        if not all([self.access_key_id, self.access_key_secret, self.endpoint, self.bucket_name]):
-            logger.warning("OSS configuration incomplete")
-            return
-
-        # 初始化OSS客户端
-        self.auth = oss2.Auth(self.access_key_id, self.access_key_secret)
-        self.bucket = oss2.Bucket(self.auth, self.endpoint, self.bucket_name)
-
-    async def upload_file(self, file_path: str, object_name: Optional[str] = None) -> str:
+    async def upload_file(self, file_path: str, oss_path: str) -> str:
         """
-        上传文件到OSS
+        上传文件到 OSS
         
         Args:
             file_path: 本地文件路径
-            object_name: OSS对象名称（可选）
-        
+            oss_path: OSS 上的文件路径
+            
         Returns:
-            str: 文件访问URL
+            str: 文件的 OSS URL
         """
         try:
-            if not os.path.exists(file_path):
-                raise FileNotFoundError(f"File not found: {file_path}")
-
-            # 如果没有指定对象名称，使用文件名
-            if object_name is None:
-                object_name = os.path.basename(file_path)
-
             # 上传文件
-            self.bucket.put_object_from_file(object_name, file_path)
-
-            # 返回文件URL
-            if self.base_url:
-                return f"{self.base_url.rstrip('/')}/{object_name}"
-            else:
-                return f"https://{self.bucket_name}.{self.endpoint}/{object_name}"
-
+            self.bucket.put_object_from_file(oss_path, file_path)
+            
+            # 生成文件 URL
+            url = f"https://{OSS_CONFIG['bucket_name']}.{OSS_CONFIG['endpoint']}/{oss_path}"
+            logger.info(f"File uploaded successfully: {url}")
+            return url
+            
         except Exception as e:
-            logger.error(f"Error uploading file to OSS: {str(e)}")
+            logger.error(f"Failed to upload file to OSS: {str(e)}")
             raise
 
     async def delete_file(self, object_name: str) -> bool:
@@ -81,11 +68,11 @@ class OSSClient:
     def is_configured(self) -> bool:
         """检查OSS客户端是否配置完整"""
         return all([
-            self.access_key_id,
-            self.access_key_secret,
-            self.endpoint,
-            self.bucket_name
+            OSS_CONFIG['access_key_id'],
+            OSS_CONFIG['access_key_secret'],
+            OSS_CONFIG['endpoint'],
+            OSS_CONFIG['bucket_name']
         ])
 
-# 创建全局OSS客户端实例
+# 创建全局 OSS 客户端实例
 oss_client = OSSClient() 

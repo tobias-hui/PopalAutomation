@@ -1,20 +1,25 @@
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+from typing import Dict, Tuple
 
 # 加载环境变量
 load_dotenv()
 
 # 基础路径配置
-BASE_DIR = Path(__file__).resolve().parent.parent.parent
+BASE_DIR = Path(__file__).parent.parent
 TEMP_DIR = BASE_DIR / "temp"
 OUTPUT_DIR = BASE_DIR / "output"
+ASSETS_DIR = BASE_DIR / "assets"
+FONTS_DIR = ASSETS_DIR / "fonts"
 
 # OSS配置
-OSS_ACCESS_KEY_ID = os.getenv('OSS_ACCESS_KEY_ID')
-OSS_ACCESS_KEY_SECRET = os.getenv('OSS_ACCESS_KEY_SECRET')
-OSS_ENDPOINT = os.getenv('OSS_ENDPOINT', 'oss-cn-hongkong.aliyuncs.com')
-OSS_BUCKET_NAME = os.getenv('OSS_BUCKET_NAME', 'canva0')
+OSS_CONFIG = {
+    'bucket_name': os.getenv('OSS_BUCKET_NAME', 'your-bucket-name'),
+    'endpoint': os.getenv('OSS_ENDPOINT', 'your-endpoint'),
+    'access_key_id': os.getenv('OSS_ACCESS_KEY_ID', 'your-access-key-id'),
+    'access_key_secret': os.getenv('OSS_ACCESS_KEY_SECRET', 'your-access-key-secret')
+}
 
 # API配置
 API_VERSION = "1.0.0"
@@ -24,8 +29,63 @@ API_DESCRIPTION = "API for processing product images with dimensions"
 # 文件处理配置
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 ALLOWED_EXTENSIONS = {'.zip', '.txt'}
-CANVAS_SIZE = (1024, 1024)
+
+# 画布配置
+CANVAS_SIZE: Tuple[int, int] = (1000, 1000)
+DEFAULT_DRAW_AREA: Dict[str, int] = {
+    'x': 100,
+    'y': 100,
+    'width': 800,
+    'height': 800
+}
 
 # 日志配置
-LOG_LEVEL = "INFO"
-LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s" 
+LOG_CONFIG = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'standard': {
+            'format': '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
+        },
+    },
+    'handlers': {
+        'default': {
+            'level': 'INFO',
+            'formatter': 'standard',
+            'class': 'logging.StreamHandler',
+        },
+        'file': {
+            'level': 'INFO',
+            'formatter': 'standard',
+            'class': 'logging.FileHandler',
+            'filename': 'app.log',
+            'mode': 'a',
+        },
+    },
+    'loggers': {
+        '': {  # root logger
+            'handlers': ['default', 'file'],
+            'level': 'INFO',
+            'propagate': True
+        }
+    }
+}
+
+# 任务状态配置
+TASK_STATUS = {
+    'PENDING': 'pending',
+    'PROCESSING': 'processing',
+    'COMPLETED': 'completed',
+    'FAILED': 'failed'
+}
+
+# 错误消息配置
+ERROR_MESSAGES = {
+    'INVALID_DIMENSIONS': 'Invalid dimensions provided',
+    'PROCESSING_FAILED': 'Image processing failed',
+    'UPLOAD_FAILED': 'Failed to upload file to OSS',
+    'FILE_NOT_FOUND': 'Required file not found',
+    'INVALID_FILE_TYPE': 'Invalid file type',
+    'ZIP_CORRUPTED': 'Generated ZIP file is corrupted',
+    'ZIP_EMPTY': 'Generated ZIP file is empty'
+} 
