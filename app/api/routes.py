@@ -13,6 +13,9 @@ from io import BytesIO
 import zipfile
 from zipfile import ZipFile, BadZipFile
 import httpx
+import time
+import aiofiles
+from PIL import Image
 
 from app.core.image_processor import (
     DimensionProcessor,
@@ -58,7 +61,13 @@ async def process_carousel_background_task(
         await update_task_status(db, task_id, TaskStatus.PROCESSING)
         
         # 下载ZIP文件
-        zip_data = BytesIO(httpx.get(zip_url).content)
+        async with httpx.AsyncClient() as client:
+            response = await client.get(str(zip_url))
+            if response.status_code != 200:
+                error_msg = f"Failed to download ZIP file: HTTP {response.status_code}"
+                logger.error(error_msg)
+                raise HTTPException(status_code=response.status_code, detail=error_msg)
+            zip_data = BytesIO(response.content)
         
         # 处理图片
         processor = CarouselImageProcessor(dimensions)
