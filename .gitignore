@@ -60,3 +60,14 @@ app/tests/
 *.tar.gz
 
 image-processing.service
+
+# Local development
+.env.local
+.env.*.local
+
+# Generated files
+postman/
+
+# Database
+*.sqlite3
+*.db

@@ -202,7 +202,7 @@ class DimensionProcessor(BaseImageProcessor):
             
             # 绘制高度文本
             height_text = f"{self.height}cm / {round(self.height/2.54, 2)}inch"
-            txt = Image.new('RGBA', (200, 30), (0, 0, 0, 0))  # 增加宽度以适应更长的文本
+            txt = Image.new('RGBA', (300, 30), (0, 0, 0, 0))  # 增加宽度以适应更长的文本
             txt_draw = ImageDraw.Draw(txt)
             txt_draw.text((0, 0), height_text, fill=(0, 0, 0), font=self.text_font)
             txt = txt.rotate(-90, expand=True)

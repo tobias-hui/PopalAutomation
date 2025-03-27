@@ -194,7 +194,7 @@ async def update_task_status(
         task.updated_at = datetime.utcnow()
         db.commit()
 
-@router.post("/carousel", response_model=ProcessResponse)
+@router.post("/carousel", response_model=ProcessResponse, tags=["Images"])
 async def process_carousel(
     request: CarouselRequest, 
     background_tasks: BackgroundTasks,
@@ -234,7 +234,7 @@ async def process_carousel(
         logger.error(f"Error creating carousel task: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/dimension", response_model=ProcessResponse)
+@router.post("/dimension", response_model=ProcessResponse, tags=["Images"])
 async def process_dimension(
     request: DimensionImageRequest, 
     background_tasks: BackgroundTasks,
@@ -363,7 +363,7 @@ async def process_dimension_background(task_id: str, request: DimensionImageRequ
         await update_task_status(db, task_id, TaskStatus.FAILED, error_msg)
         raise HTTPException(status_code=500, detail=error_msg)
 
-@router.get("/tasks/{task_id}/result")
+@router.get("/tasks/{task_id}/result", tags=["Tasks"])
 async def get_task_result(task_id: str, db: Session = Depends(get_db)):
     """获取任务处理结果"""
     task = db.query(Task).filter(Task.task_id == task_id).first()
@@ -379,7 +379,7 @@ async def get_task_result(task_id: str, db: Session = Depends(get_db)):
     
     return task.to_dict()
 
-@router.get("/tasks/{task_id}", response_model=TaskQueryResponse)
+@router.get("/tasks/{task_id}", response_model=TaskQueryResponse, tags=["Tasks"])
 async def get_task_status(task_id: str, db: Session = Depends(get_db)):
     """获取任务状态"""
     task = db.query(Task).filter(Task.task_id == task_id).first()
@@ -409,7 +409,7 @@ async def get_task_status(task_id: str, db: Session = Depends(get_db)):
         result=task.result
     )
 
-@router.get("/tasks", response_model=List[TaskQueryResponse])
+@router.get("/tasks", response_model=List[TaskQueryResponse], tags=["Tasks"])
 async def list_tasks(
     limit: int = 10,
     status: Optional[str] = None,
@@ -441,7 +441,7 @@ async def list_tasks(
         ) for task in tasks
     ]
 
-@router.delete("/tasks/{task_id}")
+@router.delete("/tasks/{task_id}", tags=["Tasks"])
 async def delete_task(task_id: str, db: Session = Depends(get_db)):
     """删除任务记录"""
     task = db.query(Task).filter(Task.task_id == task_id).first()
@@ -614,7 +614,7 @@ async def upload_file(
             detail=f"Error uploading file: {str(e)}"
         )
 
-@router.post("/orders", response_model=OrderResponse)
+@router.post("/orders", response_model=OrderResponse, tags=["Orders"])
 async def create_order(request: OrderRequest):
     """
     创建订单API端点
@@ -767,7 +767,7 @@ async def process_product_info_background(task_id: str, request: ProductInfoRequ
         await update_task_status(db, task_id, TaskStatus.FAILED, error=error_msg)
         raise HTTPException(status_code=500, detail=error_msg)
 
-@router.post("/product-info", response_model=ProcessResponse)
+@router.post("/product-info", response_model=ProcessResponse, tags=["Images"])
 async def process_product_info(
     request: ProductInfoRequest,
     background_tasks: BackgroundTasks,
