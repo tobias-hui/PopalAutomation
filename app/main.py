@@ -31,12 +31,16 @@ app = FastAPI(
             "description": "图片处理相关的 API 接口"
         },
         {
-            "name": "Tasks",
-            "description": "任务管理相关的 API 接口"
+            "name": "Listing",
+            "description": "产品listing相关的 API 接口"
         },
         {
             "name": "Orders",
             "description": "订单管理相关的 API 接口"
+        },
+        {
+            "name": "Tasks",
+            "description": "任务管理相关的 API 接口"
         }
     ]
 )
