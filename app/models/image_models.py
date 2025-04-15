@@ -97,4 +97,10 @@ class ProductInfoRequest(BaseModel):
     pcs: int = Field(..., description="产品数量")
     height_cm: float = Field(..., description="产品高度（厘米）")
     length_cm: float = Field(..., description="产品长度（厘米）")
-    image_url: HttpUrl = Field(..., description="产品图片URL") 
+    image_url: HttpUrl = Field(..., description="产品图片URL")
+
+class ComplianceLabelRequest(BaseModel):
+    """合规标签处理请求"""
+    batch_code: str = Field(..., description="批次号")
+    barcode_url: HttpUrl = Field(..., description="条形码图片URL")
+    task_id: str = Field(..., description="任务ID") 
