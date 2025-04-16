@@ -8,19 +8,20 @@ from pathlib import Path
 import zipfile
 from tempfile import TemporaryDirectory
 from PIL import Image
+import os
 
 from app.models.task_models import Task, TaskStatus
 from app.core.image_processor import (
     CarouselImageProcessor, 
     DimensionProcessor,
-    WhiteBackgroundProcessor
 )
 from app.core.product_info_processor import ProductInfoProcessor
-from app.core.compliance_label_processor import ComplianceLabelProcessor
+from app.core.compliance_label_processor import ComplianceLabelProcessor, BricksComplianceLabelProcessor
 from app.models.image_models import (
     DimensionImageRequest,
     ProductInfoRequest,
-    ComplianceLabelRequest
+    ComplianceLabelRequest,
+    BricksComplianceLabelRequest
 )
 from app.utils.oss_client import oss_client
 
@@ -394,6 +395,78 @@ async def process_compliance_label_background(task_id: str, request: ComplianceL
         raise e
     except Exception as e:
         error_msg = f"Unexpected error processing compliance label: {str(e)}"
+        logger.error(error_msg)
+        await update_task_status(db, task_id, TaskStatus.FAILED, error=error_msg)
+        raise HTTPException(status_code=500, detail=error_msg)
+
+async def process_bricks_compliance_label_background(
+    task_id: str,
+    request: BricksComplianceLabelRequest,
+    db: Session
+):
+    """后台处理积木合规标签"""
+    try:
+        # 更新任务状态为处理中
+        await update_task_status(db, task_id, TaskStatus.PROCESSING)
+        
+        # 创建处理器实例
+        processor = BricksComplianceLabelProcessor(
+            batch_code=request.batch_code,
+            model=request.model,
+            barcode_url=request.barcode_url
+        )
+        
+        # 处理图片
+        try:
+            processed_image = processor.process_image()
+            
+            # 创建临时目录保存处理后的图片
+            with TemporaryDirectory() as temp_dir:
+                temp_dir = Path(temp_dir)
+                output_path = temp_dir / f"processed_{task_id}.png"
+                
+                # 保存处理后的图片
+                processed_image.save(output_path, "PNG")
+                
+                # 生成OSS对象名称
+                oss_filename = f"processed_images/bricks_compliance_label_{task_id}.png"
+                
+                # 上传到OSS
+                try:
+                    output_url = await oss_client.upload_file(str(output_path), oss_filename)
+                    logger.info(f"Successfully uploaded processed image to OSS: {output_url}")
+                except Exception as e:
+                    error_msg = f"Error uploading to OSS: {str(e)}"
+                    logger.error(error_msg)
+                    raise HTTPException(status_code=500, detail=error_msg)
+                
+                # 更新任务状态为完成
+                await update_task_status(
+                    db, 
+                    task_id, 
+                    TaskStatus.COMPLETED,
+                    output_url=output_url,
+                    additional_data={"output_url": output_url}
+                )
+                
+                return {"status": "success", "output_url": output_url}
+                
+        except ValueError as e:
+            error_msg = str(e)
+            logger.error(f"Validation error processing bricks compliance label: {error_msg}")
+            raise HTTPException(status_code=400, detail=error_msg)
+        except Exception as e:
+            error_msg = f"Error processing bricks compliance label: {str(e)}"
+            logger.error(error_msg)
+            raise HTTPException(status_code=500, detail=error_msg)
+            
+    except HTTPException as e:
+        error_msg = str(e.detail)
+        logger.error(f"HTTP error processing bricks compliance label: {error_msg}")
+        await update_task_status(db, task_id, TaskStatus.FAILED, error=error_msg)
+        raise e
+    except Exception as e:
+        error_msg = f"Unexpected error processing bricks compliance label: {str(e)}"
         logger.error(error_msg)
         await update_task_status(db, task_id, TaskStatus.FAILED, error=error_msg)
         raise HTTPException(status_code=500, detail=error_msg)

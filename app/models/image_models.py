@@ -103,4 +103,11 @@ class ComplianceLabelRequest(BaseModel):
     """合规标签处理请求"""
     batch_code: str = Field(..., description="批次号")
     barcode_url: HttpUrl = Field(..., description="条形码图片URL")
+    task_id: str = Field(..., description="任务ID")
+
+class BricksComplianceLabelRequest(BaseModel):
+    """积木合规标签处理请求"""
+    batch_code: str = Field(..., description="批次号")
+    model: str = Field(..., description="型号")
+    barcode_url: HttpUrl = Field(..., description="条形码图片URL")
     task_id: str = Field(..., description="任务ID") 

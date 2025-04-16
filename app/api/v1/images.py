@@ -11,13 +11,15 @@ from app.models.image_models import (
     CarouselRequest,
     ProcessResponse,
     ProductInfoRequest,
-    ComplianceLabelRequest
+    ComplianceLabelRequest,
+    BricksComplianceLabelRequest
 )
 from .utils import (
     process_carousel_background_task,
     process_dimension_background,
     process_product_info_background,
-    process_compliance_label_background
+    process_compliance_label_background,
+    process_bricks_compliance_label_background
 )
 
 # 配置日志
@@ -164,4 +166,37 @@ async def process_compliance_label(
         
     except Exception as e:
         logger.error(f"Error processing compliance label: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/bricks-compliance-label", response_model=ProcessResponse)
+async def process_bricks_compliance_label(
+    request: BricksComplianceLabelRequest,
+    db: Session = Depends(get_db)
+):
+    """处理积木合规标签API端点"""
+    try:
+        # 创建任务记录
+        task_id = str(uuid.uuid4())
+        task = Task(
+            task_id=task_id,
+            status=TaskStatus.PENDING,
+            created_at=datetime.utcnow(),
+            message="积木合规标签处理任务已创建",
+            request_data=serialize_request_data(request.dict())
+        )
+        db.add(task)
+        db.commit()
+        
+        # 直接调用处理函数
+        result = await process_bricks_compliance_label_background(task_id, request, db)
+        
+        return ProcessResponse(
+            task_id=task_id,
+            status="completed",
+            output_url=result["output_url"],
+            created_at=task.created_at
+        )
+        
+    except Exception as e:
+        logger.error(f"Error processing bricks compliance label: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e)) 

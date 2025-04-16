@@ -16,6 +16,7 @@ fastapi==0.104.1
 greenlet==3.1.1
 h11==0.14.0
 httpcore==1.0.7
+httptools==0.6.4
 httpx==0.26.0
 idna==3.10
 jiter==0.9.0
@@ -44,3 +45,6 @@ tqdm==4.67.1
 typing-extensions==4.13.1
 urllib3==2.3.0
 uvicorn==0.23.2
+uvloop==0.21.0
+watchfiles==1.0.5
+websockets==15.0.1
